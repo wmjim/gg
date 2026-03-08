@@ -66,6 +66,29 @@ cargo run -- list
 cargo run -- search gre
 ```
 
+## 默认笔记目录
+
+路径优先级：`--notes-dir` > `GG_NOTES_DIR` > 系统配置目录下 `gg/notes`
+
+| 平台 | 默认笔记目录 |
+|------|-------------|
+| Linux | `~/.config/gg/notes` |
+| macOS | `~/Library/Application Support/gg/notes` |
+| Windows | `%APPDATA%\gg\notes` |
+
+```bash
+# 方式1: 命令行参数
+gg --notes-dir ~/my-notes ls
+
+# 方式2: 环境变量
+# Linux/macOS
+export GG_NOTES_DIR=~/my-notes
+
+# PowerShell
+$env:GG_NOTES_DIR = "D:\\notes"
+```
+
+
 ## 笔记目录结构
 
 v1 约定每个命令一个文件：
@@ -78,6 +101,7 @@ notes/
 ```
 
 `gg ls` 会读取 `ls.md`。
+
 
 ## 使用说明
 
@@ -99,22 +123,6 @@ gg list
 ```bash
 gg search ls
 gg search gre
-```
-
-### 4) 临时指定笔记目录
-
-```bash
-gg --notes-dir ~/my-notes ls
-```
-
-### 5) 环境变量指定笔记目录
-
-```bash
-# Linux/macOS
-export GG_NOTES_DIR=~/my-notes
-
-# PowerShell
-$env:GG_NOTES_DIR = "D:\\notes"
 ```
 
 ## 配置文件
