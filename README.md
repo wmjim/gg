@@ -1,4 +1,3 @@
-
 # gg
 
 > 让 man 文档为你而生长
@@ -15,28 +14,23 @@
 - 列表：`gg list`
 - 搜索：`gg search <keyword>`（仅按文件名匹配）
 - 路径优先级：`--notes-dir` > `GG_NOTES_DIR` > 系统配置目录下 `gg/notes`
-- Markdown 渲染：TTY 下彩色渲染；非 TTY 下输出原始 Markdown
-- 渲染主题：自动检测终端深浅主题，可用 `GG_TERM_THEME=dark|light` 强制指定
+- Markdown 渲染：优先调用 `glow`，失败时回退原始 Markdown 输出
 - AI 回退：未命中时检测 `claude`，可询问后生成并保存
 
 ## 安装与构建
 
 ### 方式 1：安装到系统（推荐）
 
-在项目目录执行：
-
 ```bash
 cargo install --path . --force
 ```
 
-安装后可直接在任意目录使用：
+安装后可在任意目录使用：
 
 ```bash
 gg --version
 gg list
 ```
-
-说明：`cargo install` 会把可执行文件放到 Cargo 的 bin 目录（通常是 `~/.cargo/bin` 或 `%USERPROFILE%\\.cargo\\bin`）。
 
 ### 方式 2：仅构建发布二进制
 
@@ -44,31 +38,28 @@ gg list
 cargo build --release
 ```
 
-可执行文件：
-
 - Windows: `target/release/gg.exe`
 - Linux/macOS: `target/release/gg`
 
-你可以手动把它复制到 PATH 中的目录。
+## glow 渲染
 
-### PATH 检查
+`gg` 优先调用 `glow` 在终端渲染 Markdown。
 
-如果执行 `gg` 提示找不到命令，请确认 Cargo bin 在 PATH 中：
+- 默认执行：`glow -`
+- 未安装 `glow` 或调用失败时，自动回退为原始 Markdown 输出
+- 可通过 `GG_GLOW_BIN` 指定 `glow` 路径
 
-- Linux/macOS: `~/.cargo/bin`
-- Windows: `%USERPROFILE%\\.cargo\\bin`
-
-## 开发运行
+示例：
 
 ```bash
-cargo run -- ls
-cargo run -- list
-cargo run -- search gre
+# Linux/macOS
+export GG_GLOW_BIN=/usr/local/bin/glow
+
+# PowerShell
+$env:GG_GLOW_BIN = "C:\\Tools\\glow.exe"
 ```
 
 ## 默认笔记目录
-
-路径优先级：`--notes-dir` > `GG_NOTES_DIR` > 系统配置目录下 `gg/notes`
 
 | 平台 | 默认笔记目录 |
 |------|-------------|
@@ -76,22 +67,17 @@ cargo run -- search gre
 | macOS | `~/Library/Application Support/gg/notes` |
 | Windows | `%APPDATA%\gg\notes` |
 
+路径优先级：`--notes-dir` > `GG_NOTES_DIR` > 默认目录。
+
 ```bash
-# 方式1: 命令行参数
+# 命令行参数
 gg --notes-dir ~/my-notes ls
 
-# 方式2: 环境变量
-# Linux/macOS
+# 环境变量
 export GG_NOTES_DIR=~/my-notes
-
-# PowerShell
-$env:GG_NOTES_DIR = "D:\\notes"
 ```
 
-
 ## 笔记目录结构
-
-v1 约定每个命令一个文件：
 
 ```text
 notes/
@@ -102,37 +88,18 @@ notes/
 
 `gg ls` 会读取 `ls.md`。
 
-
 ## 使用说明
-
-### 1) 查询命令笔记
 
 ```bash
 gg ls
-gg grep
-```
-
-### 2) 列出全部笔记
-
-```bash
 gg list
-```
-
-### 3) 按命令名搜索
-
-```bash
-gg search ls
 gg search gre
 ```
 
 ## 配置文件
 
-配置文件位置：
-
 - Linux/macOS: `~/.config/gg/config.toml`
-- Windows: `%APPDATA%\\gg\\config.toml`
-
-示例：
+- Windows: `%APPDATA%\gg\config.toml`
 
 ```toml
 ask_before_ai = true
@@ -141,32 +108,6 @@ ask_before_save = false
 ai_note_language = "zh-CN"
 ai_provider = "claude"
 ```
-
-字段说明：
-
-- `ask_before_ai`: 交互终端下，未命中时是否先询问再调用 AI
-- `auto_save_ai`: AI 生成后默认是否保存
-- `ask_before_save`: 交互终端下，保存前是否再次询问
-- `ai_note_language`: AI 生成笔记的目标语言
-- `ai_provider`: 当前仅支持 `claude`
-
-## 渲染主题
-
-默认会自动按终端环境推断深色/浅色风格（代码块与行内代码会适配不同主题）。
-
-如果你想手动强制：
-
-```bash
-# Linux/macOS
-export GG_TERM_THEME=dark
-# 或
-export GG_TERM_THEME=light
-
-# PowerShell
-$env:GG_TERM_THEME = "dark"
-```
-
-如果设置了 `NO_COLOR`，则禁用样式输出。
 
 ## Claude 回退说明
 
@@ -178,28 +119,16 @@ $env:GG_TERM_THEME = "dark"
 4. 生成 Markdown 后输出到终端
 5. 根据保存策略保存到 `<notes_dir>/<cmd>.md`
 
-可通过环境变量覆盖 Claude 可执行文件：
-
-```bash
-# 示例：自定义 Claude 命令路径
-export GG_CLAUDE_BIN=/path/to/claude
-```
-
-## 非交互模式行为
-
-当在管道/重定向/脚本环境中运行时，不会弹交互问题：
-
-- AI 查询按默认策略自动执行（若可用）
-- 保存行为按 `auto_save_ai` 执行
+可通过 `GG_CLAUDE_BIN` 指定 Claude 可执行文件路径。
 
 ## 注意事项
 
 - v1 仅支持“单词命令名”（不能含空格）
-- 命令名不能包含 `/`、`\\`、`:`
+- 命令名不能包含 `/`、`\`、`:`
 - 仅支持 `.md` 笔记文件
 - `list`、`search`、`help` 是子命令名，不能作为普通查询命令名直接使用
 
-## 运行测试
+## 测试
 
 ```bash
 cargo test
