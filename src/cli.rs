@@ -8,6 +8,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     pub notes_dir: Option<PathBuf>,
 
+    /// Open markdown in default browser instead of terminal
+    #[arg(short, long, global = true)]
+    pub browser: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -33,7 +37,7 @@ pub enum Action {
 }
 
 impl Cli {
-    pub fn into_parts(self) -> (Option<PathBuf>, Action) {
+    pub fn into_parts(self) -> (Option<PathBuf>, bool, Action) {
         let action = match self.command {
             Commands::List => Action::List,
             Commands::Search { keyword } => Action::Search(keyword),
@@ -43,6 +47,6 @@ impl Cli {
             }
         };
 
-        (self.notes_dir, action)
+        (self.notes_dir, self.browser, action)
     }
 }

@@ -10,14 +10,14 @@ use std::path::Path;
 const SUGGESTION_LIMIT: usize = 5;
 
 pub fn run(cli: Cli) -> Result<()> {
-    let (notes_override, action) = cli.into_parts();
+    let (notes_override, browser, action) = cli.into_parts();
     let notes_dir = config::resolve_notes_dir(notes_override)?;
     let config = AppConfig::load()?;
 
     match action {
         Action::List => list_commands(&notes_dir),
         Action::Search(keyword) => search_commands(&notes_dir, &keyword),
-        Action::Query(command) => query_command(&notes_dir, &config, &command),
+        Action::Query(command) => query_command(&notes_dir, &config, &command, browser),
     }
 }
 
@@ -37,11 +37,15 @@ fn search_commands(notes_dir: &Path, keyword: &str) -> Result<()> {
     Ok(())
 }
 
-fn query_command(notes_dir: &Path, config: &AppConfig, command: &str) -> Result<()> {
+fn query_command(notes_dir: &Path, config: &AppConfig, command: &str, browser: bool) -> Result<()> {
     notes::validate_command_name(command)?;
 
     if let Some(markdown) = notes::read_note(notes_dir, command)? {
-        render::render_markdown(&markdown);
+        if browser {
+            render::render_markdown_in_browser(&markdown)?;
+        } else {
+            render::render_markdown(&markdown);
+        }
         return Ok(());
     }
 
@@ -78,7 +82,11 @@ fn query_command(notes_dir: &Path, config: &AppConfig, command: &str) -> Result<
     }
 
     let generated = ai::generate_note_with_claude(command, &config.ai_note_language)?;
-    render::render_markdown(&generated);
+    if browser {
+        render::render_markdown_in_browser(&generated)?;
+    } else {
+        render::render_markdown(&generated);
+    }
 
     let should_save = if interactive && config.ask_before_save {
         ask_yes_no("是否保存这份 AI 生成笔记到本地？", config.auto_save_ai)?
