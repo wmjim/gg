@@ -12,6 +12,10 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub browser: bool,
 
+    /// Open markdown in default editor for editing
+    #[arg(short = 'e', long, global = true)]
+    pub edit: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -37,7 +41,7 @@ pub enum Action {
 }
 
 impl Cli {
-    pub fn into_parts(self) -> (Option<PathBuf>, bool, Action) {
+    pub fn into_parts(self) -> (Option<PathBuf>, bool, bool, Action) {
         let action = match self.command {
             Commands::List => Action::List,
             Commands::Search { keyword } => Action::Search(keyword),
@@ -47,6 +51,15 @@ impl Cli {
             }
         };
 
-        (self.notes_dir, self.browser, action)
+        (self.notes_dir, self.browser, self.edit, action)
     }
 }
+
+
+
+
+
+
+
+
+

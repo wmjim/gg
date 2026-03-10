@@ -1,6 +1,7 @@
 use crate::ai;
 use crate::cli::{Action, Cli};
 use crate::config::{self, AppConfig};
+use crate::editor;
 use crate::notes;
 use crate::render;
 use anyhow::Result;
@@ -10,14 +11,14 @@ use std::path::Path;
 const SUGGESTION_LIMIT: usize = 5;
 
 pub fn run(cli: Cli) -> Result<()> {
-    let (notes_override, browser, action) = cli.into_parts();
+    let (notes_override, browser, edit, action) = cli.into_parts();
     let notes_dir = config::resolve_notes_dir(notes_override)?;
     let config = AppConfig::load()?;
 
     match action {
         Action::List => list_commands(&notes_dir),
         Action::Search(keyword) => search_commands(&notes_dir, &keyword),
-        Action::Query(command) => query_command(&notes_dir, &config, &command, browser),
+        Action::Query(command) => query_command(&notes_dir, &config, &command, browser, edit),
     }
 }
 
@@ -37,9 +38,14 @@ fn search_commands(notes_dir: &Path, keyword: &str) -> Result<()> {
     Ok(())
 }
 
-fn query_command(notes_dir: &Path, config: &AppConfig, command: &str, browser: bool) -> Result<()> {
+fn query_command(notes_dir: &Path, config: &AppConfig, command: &str, browser: bool, edit: bool) -> Result<()> {
     notes::validate_command_name(command)?;
 
+    if edit {
+        let path = notes::ensure_note_file(notes_dir, command)?;
+        editor::open_in_editor(&path)?;
+        return Ok(());
+    }
     if let Some(markdown) = notes::read_note(notes_dir, command)? {
         if browser {
             render::render_markdown_in_browser(&markdown)?;
@@ -133,3 +139,11 @@ fn ask_yes_no(question: &str, default_yes: bool) -> Result<bool> {
         writeln!(stderr, "请输入 y 或 n。")?;
     }
 }
+
+
+
+
+
+
+
+

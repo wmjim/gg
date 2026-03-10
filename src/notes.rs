@@ -39,6 +39,17 @@ pub fn write_note(notes_dir: &Path, command: &str, content: &str) -> Result<Path
         .with_context(|| format!("Failed to write note: {}", path.display()))?;
     Ok(path)
 }
+pub fn ensure_note_file(notes_dir: &Path, command: &str) -> Result<PathBuf> {
+    fs::create_dir_all(notes_dir)
+        .with_context(|| format!("Failed to create notes directory: {}", notes_dir.display()))?;
+
+    let path = note_path(notes_dir, command);
+    if !path.exists() {
+        fs::write(&path, "")
+            .with_context(|| format!("Failed to create note: {}", path.display()))?;
+    }
+    Ok(path)
+}
 
 pub fn list_commands(notes_dir: &Path) -> Result<Vec<String>> {
     if !notes_dir.exists() {
@@ -148,3 +159,4 @@ mod tests {
         assert_eq!(suggestions, vec!["ls", "less", "lsof"]);
     }
 }
+

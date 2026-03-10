@@ -142,3 +142,13 @@ gg --browser ls
 ```
 
 该模式会把 Markdown 转成 HTML 并用系统默认浏览器打开。
+## 编辑笔记
+
+如果想直接用默认编辑器打开并修改笔记，可以使用 `--edit`：
+
+```bash
+gg --edit ls
+```
+
+编辑器优先级：`GG_EDITOR` > `VISUAL` > `EDITOR`。未设置时会尝试系统默认编辑方式。
+
