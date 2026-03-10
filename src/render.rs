@@ -299,7 +299,18 @@ fn open_in_browser(path: &PathBuf) -> io::Result<()> {
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-            // Use cmd.exe /c start to open browser
+            // Prefer Windows PowerShell Start-Process for reliability in WSL
+            let ps_status = Command::new("powershell.exe")
+                .args(["-NoProfile", "-Command", "Start-Process", &windows_path])
+                .status();
+
+            if let Ok(status) = ps_status {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+
+            // Fallback to cmd.exe /c start
             Command::new("cmd.exe")
                 .args(["/C", "start", "", &windows_path])
                 .spawn()
@@ -429,5 +440,4 @@ fn print_raw(markdown: &str) {
         println!();
     }
 }
-
 
