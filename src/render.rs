@@ -276,21 +276,6 @@ fn open_in_browser(path: &PathBuf) -> io::Result<()> {
                 .unwrap_or(false);
 
         if is_wsl {
-            // In WSL, check if we can run Windows executables
-            let can_run_windows = Command::new("cmd.exe")
-                .arg("--version")
-                .output()
-                .is_ok();
-
-            if !can_run_windows {
-                return Err(io::Error::other(
-                    "WSL 无法运行 Windows 可执行文件。请确保:\n\
-                     1. WSL 版本支持 Windows 互操作 (WSL 2 推荐)\n\
-                     2. 已在 Windows 设置中启用 \"适用于 Linux 的 Windows 子系统\"\n\
-                     3. 或者在 Linux 端安装浏览器 (如 firefox, chromium)"
-                ));
-            }
-
             // In WSL, convert path to Windows format first
             let windows_path = Command::new("wslpath")
                 .arg("-w")
@@ -299,24 +284,81 @@ fn open_in_browser(path: &PathBuf) -> io::Result<()> {
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-            // Prefer Windows PowerShell Start-Process for reliability in WSL
-            let ps_status = Command::new("powershell.exe")
-                .args(["-NoProfile", "-Command", "Start-Process", &windows_path])
-                .status();
+            // Try wslview first if available (wslu)
+            if let Ok(status) = Command::new("wslview").arg(&windows_path).status() {
+                if status.success() {
+                    return Ok(());
+                }
+            }
 
-            if let Ok(status) = ps_status {
+            // Prefer Windows PowerShell Start-Process for reliability in WSL
+            if let Ok(status) = Command::new("powershell.exe")
+                .args(["-NoProfile", "-Command", "Start-Process", &windows_path])
+                .status()
+            {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+
+            // PowerShell 7 (pwsh) fallback
+            if let Ok(status) = Command::new("pwsh.exe")
+                .args(["-NoProfile", "-Command", "Start-Process", &windows_path])
+                .status()
+            {
                 if status.success() {
                     return Ok(());
                 }
             }
 
             // Fallback to cmd.exe /c start
-            Command::new("cmd.exe")
+            if let Ok(status) = Command::new("cmd.exe")
                 .args(["/C", "start", "", &windows_path])
-                .spawn()
-                .map_err(|e| io::Error::other(format!("打开浏览器失败: {}", e)))?;
+                .status()
+            {
+                if status.success() {
+                    return Ok(());
+                }
+            }
 
-            return Ok(());
+            // Try common absolute Windows paths if PATH interop is missing
+            let powershell_path = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
+            if let Ok(status) = Command::new(powershell_path)
+                .args(["-NoProfile", "-Command", "Start-Process", &windows_path])
+                .status()
+            {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+
+            let cmd_path = "/mnt/c/Windows/System32/cmd.exe";
+            if let Ok(status) = Command::new(cmd_path)
+                .args(["/C", "start", "", &windows_path])
+                .status()
+            {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+
+            let explorer_path = "/mnt/c/Windows/explorer.exe";
+            if let Ok(status) = Command::new(explorer_path)
+                .arg(&windows_path)
+                .status()
+            {
+                if status.success() {
+                    return Ok(());
+                }
+            }
+
+            return Err(io::Error::other(
+                "WSL 无法打开 Windows 默认浏览器。建议尝试:\n\
+                 1. 确认 WSL 互操作已开启 (WSL 2 推荐)\n\
+                 2. 将 /mnt/c/Windows/System32 加入 PATH\n\
+                 3. 安装 wslu 并使用 wslview\n\
+                 4. 或在 Linux 端安装浏览器 (firefox, chromium)"
+            ));
         }
 
         // Try common browsers on Linux
