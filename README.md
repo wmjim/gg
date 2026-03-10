@@ -133,3 +133,12 @@ ai_provider = "claude"
 ```bash
 cargo test
 ```
+## 浏览器渲染
+
+`gg` 默认在终端渲染 Markdown（优先调用 `glow`）。如果你想在浏览器中打开并渲染，可以加上 `--browser`：
+
+```bash
+gg --browser ls
+```
+
+该模式会把 Markdown 转成 HTML 并用系统默认浏览器打开。
