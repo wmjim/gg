@@ -1,14 +1,39 @@
+use crate::config::AppConfig;
 use std::env;
 use std::io;
 use std::path::Path;
 use std::process::Command;
 
-pub fn open_in_editor(path: &Path) -> io::Result<()> {
+pub fn open_in_editor(path: &Path, config: &AppConfig) -> io::Result<()> {
+    // Use configured editor if available (takes precedence over env vars)
+    if let Some(ref editor) = config.editor {
+        if !editor.trim().is_empty() {
+            // Verify the editor exists before trying to use it
+            if editor_exists(editor) {
+                return run_editor_command(editor, path);
+            }
+            // Editor doesn't exist, warn and skip env vars since they might also be problematic
+            eprintln!("Warning: configured editor '{}' not found, trying default editors...", editor);
+            return open_with_default_editor(path);
+        }
+    }
+
+    // Fall back to environment variables only if no configured editor
     if let Some(editor) = editor_command() {
-        return run_editor_command(&editor, path);
+        if editor_exists(&editor) {
+            return run_editor_command(&editor, path);
+        }
+        eprintln!("Warning: {} not found, trying default editors...", editor);
     }
 
     open_with_default_editor(path)
+}
+
+fn editor_exists(editor: &str) -> bool {
+    // Check if the first word of the editor command exists
+    // This handles cases like "nvim --foo" where we just need to check "nvim"
+    let cmd = editor.split_whitespace().next().unwrap_or(editor);
+    which::which(cmd).is_ok()
 }
 
 fn editor_command() -> Option<String> {
@@ -20,19 +45,17 @@ fn editor_command() -> Option<String> {
 }
 
 fn run_editor_command(command: &str, path: &Path) -> io::Result<()> {
-    let path_str = path.to_string_lossy();
-
     #[cfg(target_os = "windows")]
     {
-        let cmd = format!("{} \"{}\"", command, path_str);
+        let cmd = format!("{} \"{}\"", command, path.to_string_lossy());
         Command::new("cmd").args(["/C", &cmd]).spawn()?;
         return Ok(());
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let cmd = format!("{} \"{}\"", command, path_str);
-        Command::new("sh").args(["-c", &cmd]).spawn()?;
+        // Run the editor and wait for it to complete
+        Command::new(command).arg(path).status()?;
         return Ok(());
     }
 }
@@ -55,9 +78,8 @@ fn open_with_default_editor(path: &Path) -> io::Result<()> {
         // Prefer terminal editors when available
         let cli_editors = ["nvim", "vim", "vi", "hx", "helix", "nano"];
         for editor in cli_editors {
-            let status = Command::new(editor).arg(path).status();
-            if let Ok(status) = status {
-                if status.success() {
+            if editor_exists(editor) {
+                if Command::new(editor).arg(path).status().map(|s| s.success()).unwrap_or(false) {
                     return Ok(());
                 }
             }

@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AppConfig {
     pub ask_before_ai: bool,
@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub ask_before_save: bool,
     pub ai_note_language: String,
     pub ai_provider: String,
+    pub editor: Option<String>,
+    pub language: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -23,6 +25,8 @@ impl Default for AppConfig {
             ask_before_save: false,
             ai_note_language: "zh-CN".to_string(),
             ai_provider: "claude".to_string(),
+            editor: None,
+            language: None,
         }
     }
 }
@@ -42,6 +46,20 @@ impl AppConfig {
         let config: Self = toml::from_str(&raw)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
         Ok(config)
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let path = config_path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let raw = toml::to_string_pretty(self)?;
+        fs::write(&path, raw)?;
+        Ok(())
+    }
+
+    pub fn is_first_run(&self) -> bool {
+        self.language.is_none()
     }
 }
 
@@ -94,6 +112,8 @@ mod tests {
         assert!(!cfg.ask_before_save);
         assert_eq!(cfg.ai_note_language, "zh-CN");
         assert_eq!(cfg.ai_provider, "claude");
+        assert!(cfg.editor.is_none());
+        assert!(cfg.language.is_none());
     }
 
     #[test]
@@ -104,6 +124,8 @@ auto_save_ai = false
 ask_before_save = true
 ai_note_language = "en"
 ai_provider = "claude"
+editor = "vim"
+language = "zh"
 "#;
         let cfg: AppConfig = toml::from_str(raw).expect("valid config");
 
@@ -112,6 +134,8 @@ ai_provider = "claude"
         assert!(cfg.ask_before_save);
         assert_eq!(cfg.ai_note_language, "en");
         assert_eq!(cfg.ai_provider, "claude");
+        assert_eq!(cfg.editor, Some("vim".to_string()));
+        assert_eq!(cfg.language, Some("zh".to_string()));
     }
 
     #[test]
