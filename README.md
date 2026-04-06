@@ -13,9 +13,11 @@
 - 查询：`gg <cmd>`
 - 列表：`gg list`
 - 搜索：`gg search <keyword>`（仅按文件名匹配）
-- 路径优先级：`--notes-dir` > `GG_NOTES_DIR` > 系统配置目录下 `gg/notes`
 - Markdown 渲染：优先调用 `glow`，失败时回退原始 Markdown 输出
-- AI 回退：未命中时检测 `claude`，可询问后生成并保存
+- 路径优先级：`--notes-dir` > `GG_NOTES_DIR` > 系统配置目录下 `gg/notes`
+- AI 回退：未命中时检测 `claude`，可询问后生成并保存笔记
+- 浏览器渲染：`--browser` 在浏览器中打开 Markdown 文件
+- 编辑笔记：`--edit` 用默认编辑器打开笔记文件
 
 ## 安装与构建
 
@@ -43,7 +45,7 @@ cargo build --release
 
 ## glow 渲染
 
-`gg` 优先调用 `glow` 在终端渲染 Markdown。
+`gg` 优先调用 [`glow`](https://github.com/charmbracelet/glow) 在终端渲染 Markdown。
 
 - 默认执行：`glow -`
 - 未安装 `glow` 或调用失败时，自动回退为原始 Markdown 输出
@@ -107,6 +109,8 @@ auto_save_ai = true
 ask_before_save = false
 ai_note_language = "zh-CN"
 ai_provider = "claude"
+editor = "vim"        # 可选：设置默认编辑器
+language = "zh"      # 可选：设置显示语言 (zh/en)
 ```
 
 ## Claude 回退说明
@@ -128,11 +132,6 @@ ai_provider = "claude"
 - 仅支持 `.md` 笔记文件
 - `list`、`search`、`help` 是子命令名，不能作为普通查询命令名直接使用
 
-## 测试
-
-```bash
-cargo test
-```
 ## 浏览器渲染
 
 `gg` 默认在终端渲染 Markdown（优先调用 `glow`）。如果你想在浏览器中打开并渲染，可以加上 `--browser`：
@@ -142,6 +141,9 @@ gg --browser ls
 ```
 
 该模式会把 Markdown 转成 HTML 并用系统默认浏览器打开。
+
+**WSL 支持**：在 WSL 环境下会自动转换路径并通过 `wslview`、`powershell.exe`、`cmd.exe` 等方式打开 Windows 默认浏览器。
+
 ## 编辑笔记
 
 如果想直接用默认编辑器打开并修改笔记，可以使用 `--edit`：
@@ -150,5 +152,27 @@ gg --browser ls
 gg --edit ls
 ```
 
-编辑器优先级：`GG_EDITOR` > `VISUAL` > `EDITOR`。未设置时会尝试系统默认编辑方式。
+编辑器优先级：`config.editor` > `GG_EDITOR` > `VISUAL` > `EDITOR`。
+
+可用 `--set-editor` 设置默认编辑器并保存到配置：
+
+```bash
+gg --set-editor vim
+```
+
+**WSL 支持**：在 WSL 环境下优先使用终端编辑器（nvim > vim > vi > helix > nano），未找到时会通过 `wslview` 或 `powershell.exe` 打开 Windows 编辑器。
+
+## 设置默认语言
+
+`--lang` 可设置显示语言（zh/en）并保存到配置：
+
+```bash
+gg --lang en
+```
+
+## 测试
+
+```bash
+cargo test
+```
 
