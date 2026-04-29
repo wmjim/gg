@@ -13,11 +13,11 @@
 - 查询：`gg <cmd>`
 - 列表：`gg list`
 - 搜索：`gg search <keyword>`（仅按文件名匹配）
-- Markdown 渲染：优先调用 `glow`，失败时回退原始 Markdown 输出
 - 路径优先级：`--notes-dir` > `GG_NOTES_DIR` > 系统配置目录下 `gg/notes`
-- AI 回退：未命中时检测 `claude`，可询问后生成并保存笔记
-- 浏览器渲染：`--browser` 在浏览器中打开 Markdown 文件
-- 编辑笔记：`--edit` 用默认编辑器打开笔记文件
+- Markdown 渲染：优先调用 `glow`，失败时回退原始 Markdown 输出
+- AI 回退：未命中时检测 `claude`，可询问后生成并保存
+- 浏览器渲染：`--browser` 在浏览器中打开 Markdown
+- 编辑笔记：`--edit` 用默认编辑器打开笔记
 
 ## 安装与构建
 
@@ -45,7 +45,7 @@ cargo build --release
 
 ## glow 渲染
 
-`gg` 优先调用 [`glow`](https://github.com/charmbracelet/glow) 在终端渲染 Markdown。
+`gg` 优先调用 `glow` 在终端渲染 Markdown。
 
 - 默认执行：`glow -`
 - 未安装 `glow` 或调用失败时，自动回退为原始 Markdown 输出
