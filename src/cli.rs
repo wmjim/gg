@@ -20,6 +20,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "LANG")]
     pub lang: Option<String>,
 
+    /// Answer yes to every prompt
+    #[arg(short = 'y', long, global = true)]
+    pub yes: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -54,6 +58,7 @@ pub struct CliParts {
     pub edit: bool,
     pub set_editor: Option<String>,
     pub lang: Option<String>,
+    pub yes: bool,
     pub action: Action,
 }
 
@@ -72,6 +77,7 @@ impl Cli {
             edit: self.edit,
             set_editor: self.set_editor,
             lang: self.lang,
+            yes: self.yes,
             action,
         }
     }
@@ -136,6 +142,9 @@ pub fn command(lang: Language) -> Command {
         })
         .mut_arg("lang", |arg| {
             arg.help(lang.cli_arg_lang()).help_heading(headings.options)
+        })
+        .mut_arg("yes", |arg| {
+            arg.help(lang.cli_arg_yes()).help_heading(headings.options)
         })
         .mut_subcommand("list", |sub| {
             sub.about(lang.cli_cmd_list())
@@ -333,7 +342,7 @@ mod tests {
     fn derive_and_localized_command_share_the_same_arg_ids() {
         // `mut_arg` 在 id 不存在时会 panic，这里确保所有 id 都与派生定义一致。
         let derived = Cli::command();
-        for id in ["notes_dir", "browser", "edit", "set_editor", "lang"] {
+        for id in ["notes_dir", "browser", "edit", "set_editor", "lang", "yes"] {
             assert!(
                 derived.get_arguments().any(|arg| arg.get_id() == id),
                 "缺少参数 {id}"

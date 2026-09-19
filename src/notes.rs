@@ -27,6 +27,35 @@ pub struct EnsuredNote {
     pub created: bool,
 }
 
+/// 扫描笔记目录时被跳过的条目。
+///
+/// 单个条目的权限问题或竞态（扫描期间被删除）不应让整个列表失败，
+/// 但也不能静默忽略——用户需要知道结果可能不完整。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+/// 一次扫描或搜索的结果。
+///
+/// `skipped` 记录因错误被跳过的条目；调用方必须把它告知用户，
+/// 否则列表看起来「完整」却在骗人。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Found<T> {
+    pub items: Vec<T>,
+    pub skipped: Vec<Skipped>,
+}
+
+impl<T> Found<T> {
+    fn none() -> Self {
+        Self {
+            items: Vec::new(),
+            skipped: Vec::new(),
+        }
+    }
+}
+
 /// 正文搜索命中的一行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentMatch {
@@ -82,19 +111,43 @@ pub fn ensure_note_file(notes_dir: &Path, command: &str) -> Result<EnsuredNote> 
     })
 }
 
-pub fn list_commands(notes_dir: &Path) -> Result<Vec<String>> {
+/// 列出笔记命令，同时返回无法读取而被跳过的条目。
+pub fn scan_commands(notes_dir: &Path) -> Result<Found<String>> {
     if !notes_dir.exists() {
-        return Ok(Vec::new());
+        return Ok(Found::none());
     }
 
     let mut commands = Vec::new();
-    for entry in fs::read_dir(notes_dir)
-        .with_context(|| format!("Failed to read notes directory: {}", notes_dir.display()))?
-    {
-        let entry = entry?;
+    let mut skipped = Vec::new();
+
+    let entries = fs::read_dir(notes_dir)
+        .with_context(|| format!("Failed to read notes directory: {}", notes_dir.display()))?;
+
+    for entry in entries {
+        // 单条 readdir 失败（权限、竞态删除）只跳过该条，不放弃整个目录。
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                skipped.push(Skipped {
+                    path: notes_dir.to_path_buf(),
+                    reason: err.to_string(),
+                });
+                continue;
+            }
+        };
+
         let path = entry.path();
-        if !path.is_file() {
-            continue;
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_file() => {}
+            // 目录、符号链接等不是笔记文件，静默忽略。
+            Ok(_) => continue,
+            Err(err) => {
+                skipped.push(Skipped {
+                    path,
+                    reason: err.to_string(),
+                });
+                continue;
+            }
         }
 
         let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
@@ -105,43 +158,67 @@ pub fn list_commands(notes_dir: &Path) -> Result<Vec<String>> {
         }
 
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            skipped.push(Skipped {
+                path,
+                reason: "file name is not valid UTF-8".to_string(),
+            });
             continue;
         };
         commands.push(stem.to_string());
     }
 
     commands.sort();
-    Ok(commands)
+    Ok(Found {
+        items: commands,
+        skipped,
+    })
 }
 
-pub fn search_commands_by_name(notes_dir: &Path, keyword: &str) -> Result<Vec<String>> {
+pub fn search_commands_by_name(notes_dir: &Path, keyword: &str) -> Result<Found<String>> {
     let keyword = keyword.to_ascii_lowercase();
-    let mut results: Vec<String> = list_commands(notes_dir)?
+    let found = scan_commands(notes_dir)?;
+    let mut items: Vec<String> = found
+        .items
         .into_iter()
         .filter(|command| command.to_ascii_lowercase().contains(&keyword))
         .collect();
-    results.sort();
-    Ok(results)
+    items.sort();
+    Ok(Found {
+        items,
+        skipped: found.skipped,
+    })
 }
 
 /// 按正文内容搜索笔记，返回 grep 风格的命中行。
 ///
 /// 刻意不做 Markdown 语法营剥：用户能直接看到原文上下文，行为可预测。
-pub fn search_notes_by_content(notes_dir: &Path, keyword: &str) -> Result<Vec<ContentMatch>> {
+pub fn search_notes_by_content(notes_dir: &Path, keyword: &str) -> Result<Found<ContentMatch>> {
     let needle = keyword.to_ascii_lowercase();
     if needle.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Found::none());
     }
 
-    let mut matches = Vec::new();
-    for command in list_commands(notes_dir)? {
-        let Some(content) = read_note(notes_dir, &command)? else {
-            continue;
+    let found = scan_commands(notes_dir)?;
+    let mut skipped = found.skipped;
+    let mut items = Vec::new();
+
+    for command in found.items {
+        let content = match read_note(notes_dir, &command) {
+            Ok(Some(content)) => content,
+            Ok(None) => continue,
+            // 单个笔记读不了不应中断整次搜索。
+            Err(err) => {
+                skipped.push(Skipped {
+                    path: note_path(notes_dir, &command),
+                    reason: format!("{err:#}"),
+                });
+                continue;
+            }
         };
 
         for (index, line) in content.lines().enumerate() {
             if line.to_ascii_lowercase().contains(&needle) {
-                matches.push(ContentMatch {
+                items.push(ContentMatch {
                     command: command.clone(),
                     line_number: index + 1,
                     line: line.trim().to_string(),
@@ -150,7 +227,7 @@ pub fn search_notes_by_content(notes_dir: &Path, keyword: &str) -> Result<Vec<Co
         }
     }
 
-    Ok(matches)
+    Ok(Found { items, skipped })
 }
 
 pub fn suggest_commands(query: &str, commands: &[String], limit: usize) -> Vec<String> {
@@ -245,16 +322,46 @@ mod tests {
         fs::write(temp.path().join("ls.md"), "# ls\n列出目录\n").expect("写笔记");
         fs::write(temp.path().join("ignore.txt"), "递归").expect("写非 md 文件");
 
-        let matches = search_notes_by_content(temp.path(), "递归").expect("搜索正文");
-        let rendered: Vec<String> = matches.iter().map(ContentMatch::render).collect();
+        let found = search_notes_by_content(temp.path(), "递归").expect("搜索正文");
+        let rendered: Vec<String> = found.items.iter().map(ContentMatch::render).collect();
 
         assert_eq!(
             rendered,
             vec!["grep:3: 递归搜索目录", "grep:4: 递归时要小心"]
         );
+        assert!(found.skipped.is_empty(), "不该有被跳过的条目");
 
         let none = search_notes_by_content(temp.path(), "不存在的词").expect("搜索正文");
-        assert!(none.is_empty());
+        assert!(none.items.is_empty());
+    }
+
+    #[test]
+    fn scan_commands_skips_unreadable_entries_and_reports_them() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("ls.md"), "# ls\n").expect("写笔记");
+        // 非 UTF-8 文件名在 Unix 上可构造；否则该分支由 read_dir 失败覆盖。
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+            let bad = OsStr::from_bytes(b"\xff\xfe.md");
+            fs::write(temp.path().join(bad), "# bad\n").expect("写非法文件名");
+        }
+
+        let found = scan_commands(temp.path()).expect("扫描目录不应整体失败");
+        assert_eq!(found.items, vec!["ls".to_string()]);
+        #[cfg(unix)]
+        assert_eq!(found.skipped.len(), 1, "非法文件名应被记录并跳过");
+    }
+
+    #[test]
+    fn scan_commands_on_missing_directory_is_empty_not_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("nope");
+
+        let found = scan_commands(&missing).expect("目录不存在不是错误");
+        assert!(found.items.is_empty());
+        assert!(found.skipped.is_empty());
     }
 
     #[test]
@@ -262,7 +369,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(temp.path().join("aws.md"), "AWS CLI 用法\n").expect("写笔记");
 
-        let matches = search_notes_by_content(temp.path(), "aws").expect("搜索正文");
-        assert_eq!(matches.len(), 1, "搜索应忽略大小写");
+        let found = search_notes_by_content(temp.path(), "aws").expect("搜索正文");
+        assert_eq!(found.items.len(), 1, "搜索应忽略大小写");
     }
 }

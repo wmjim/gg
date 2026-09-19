@@ -111,6 +111,10 @@ impl Language {
             zh: "已保存笔记: {path}",
             en: "Notes saved: {path}",
         },
+        notes_skipped(count: &str) => {
+            zh: "有 {count} 个条目无法读取，已跳过（用 GG_DEBUG=1 查看详情）。",
+            en: "{count} entries could not be read and were skipped (set GG_DEBUG=1 for details).",
+        },
         save_skipped() => {
             zh: "已跳过保存。",
             en: "Save skipped.",
@@ -246,6 +250,10 @@ impl Language {
         cli_arg_set_editor() => {
             zh: "设置默认编辑器并保存到配置",
             en: "Set the default editor and save it to the config",
+        },
+        cli_arg_yes() => {
+            zh: "对所有询问自动回答「是」（会跳过 AI 生成与保存的确认）",
+            en: "Answer yes to every prompt (skips the AI generation and save confirmations)",
         },
         cli_arg_lang() => {
             zh: "设置显示语言 (zh/en) 并保存到配置",

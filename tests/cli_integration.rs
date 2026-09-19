@@ -354,6 +354,95 @@ fn failing_editor_is_reported_instead_of_silently_falling_back() {
         .stderr(predicate::str::contains("退出码"));
 }
 
+/// `--yes` 应能在非交互场景授权生成，且不用改配置。
+#[test]
+fn yes_flag_authorizes_non_interactive_generation() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+    // 保持默认的「必须先问我」策略，仅靠 --yes 授权
+    write_config(
+        &temp,
+        "language = \"zh\"\nask_before_ai = true\nauto_save_ai = true\nask_before_save = true\n",
+    );
+
+    let fake_claude = create_fake_claude(&temp);
+    let marker = temp.path().join("claude-was-called");
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_CLAUDE_BIN", fake_claude);
+    cmd.env("GG_TEST_MARKER", &marker);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "--yes",
+        "foo",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("# AI Note"))
+        .stderr(predicate::str::contains("已保存笔记"));
+
+    assert!(marker.exists(), "--yes 应当授权调用 claude");
+    assert!(notes_dir.join("foo.md").exists());
+}
+
+#[test]
+fn yes_flag_is_documented_in_help() {
+    for (lang, flag, keyword) in [
+        ("zh", "-y, --yes", "对所有询问自动回答"),
+        ("en", "-y, --yes", "Answer yes to every prompt"),
+    ] {
+        let mut cmd = command_for(&TempDir::new().expect("tempdir"));
+        cmd.args(["--lang", lang, "--help"]);
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains(flag))
+            .stdout(predicate::str::contains(keyword));
+    }
+}
+
+/// 单个条目读不了时，列表必须仍然输出，并在 stderr 告知结果可能不完整。
+#[cfg(unix)]
+#[test]
+fn list_survives_unreadable_entry_and_warns() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+    fs::write(notes_dir.join(OsStr::from_bytes(b"\xff\xfe.md")), "# bad\n").expect("写非法文件名");
+
+    let mut cmd = command_for(&temp);
+    cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "list"]);
+
+    cmd.assert()
+        .success()
+        .stdout("ls\n")
+        .stderr(predicate::str::contains("无法读取"));
+}
+
+// ---------------------------------------------------------------- 列布局
+
+/// 管道场景必须保持每行一条，否则 `gg list | grep x` 之类的脚本会失效。
+#[test]
+fn list_keeps_one_entry_per_line_when_piped() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    for name in ["alias", "apt", "awk", "bear", "cat", "chmod"] {
+        write_note(&notes_dir, name, "# x\n");
+    }
+
+    let mut cmd = command_for(&temp);
+    cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "list"]);
+
+    cmd.assert()
+        .success()
+        .stdout("alias\napt\nawk\nbear\ncat\nchmod\n");
+}
+
 // ---------------------------------------------------------------- 未命中路径
 
 #[test]

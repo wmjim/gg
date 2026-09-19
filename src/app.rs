@@ -12,13 +12,17 @@ use crate::notes;
 use crate::prompt::{ConsolePrompter, Prompter};
 use crate::render::{MarkdownRenderer, OutputTarget, Renderer};
 use crate::utils::debug_log;
+use crate::utils::layout;
 use crate::utils::output;
 use anyhow::{Context, Result};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::process::ExitCode;
 
 const SUGGESTION_LIMIT: usize = 5;
+
+/// 拿不到真实终端宽度时的兜底列数。
+const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
 /// 未命中笔记时的退出码，便于脚本判断（`gg foo || echo "没笔记"`）。
 pub const EXIT_NOTE_NOT_FOUND: u8 = 3;
@@ -58,20 +62,26 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
 
     match parts.action {
         Action::List => {
-            let commands = notes::list_commands(&notes_dir)?;
-            output::write_lines(io::stdout().lock(), commands)?;
+            let found = notes::scan_commands(&notes_dir)?;
+            warn_skipped(&found.skipped, lang);
+            write_commands(&found.items, lang)?;
             Ok(ExitCode::SUCCESS)
         }
         Action::Search { keyword, content } => {
-            let matches = if content {
-                notes::search_notes_by_content(&notes_dir, &keyword)?
+            if content {
+                let found = notes::search_notes_by_content(&notes_dir, &keyword)?;
+                warn_skipped(&found.skipped, lang);
+                let lines = found
+                    .items
                     .iter()
                     .map(notes::ContentMatch::render)
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                output::write_lines(io::stdout().lock(), lines)?;
             } else {
-                notes::search_commands_by_name(&notes_dir, &keyword)?
-            };
-            output::write_lines(io::stdout().lock(), matches)?;
+                let found = notes::search_commands_by_name(&notes_dir, &keyword)?;
+                warn_skipped(&found.skipped, lang);
+                write_commands(&found.items, lang)?;
+            }
             Ok(ExitCode::SUCCESS)
         }
         Action::Query(command) => {
@@ -99,6 +109,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                     OutputTarget::Terminal
                 },
                 edit: parts.edit,
+                assume_yes: parts.yes,
             };
 
             Ok(service
@@ -126,6 +137,44 @@ fn print_help(lang: Language) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 输出命令名列表。
+///
+/// 只在 stdout 是终端时排成多列（对齐 `ls` 的行为），管道与重定向仍为
+/// 每行一条，保证 `gg list | grep x` 这类脚本不受影响。
+fn write_commands(commands: &[String], _lang: Language) -> Result<()> {
+    let stdout = io::stdout();
+    if stdout.is_terminal() {
+        let rendered = layout::format_columns(commands, terminal_width());
+        return output::write_text(stdout.lock(), &rendered);
+    }
+    output::write_lines(stdout.lock(), commands.to_vec())
+}
+
+/// 终端宽度：没有可靠的跨平台 std API，只能用 `COLUMNS`，否则按 80 列。
+fn terminal_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|width| *width > 0)
+        .unwrap_or(DEFAULT_TERMINAL_WIDTH)
+}
+
+/// 扫描时被跳过的条目必须让用户看到，否则会误以为列表是完整的。
+fn warn_skipped(skipped: &[notes::Skipped], lang: Language) {
+    if skipped.is_empty() {
+        return;
+    }
+
+    eprintln!("{}", lang.notes_skipped(&skipped.len().to_string()));
+    for entry in skipped {
+        debug_log!(
+            "app::warn_skipped: 跳过 {} —— {}",
+            entry.path.display(),
+            entry.reason
+        );
+    }
 }
 
 fn ask_language(prompter: &dyn Prompter) -> Result<Language> {
@@ -177,6 +226,8 @@ impl QueryOutcome {
 pub struct QueryOptions {
     pub target: OutputTarget,
     pub edit: bool,
+    /// `--yes`：对所有询问自动回答「是」。
+    pub assume_yes: bool,
 }
 
 pub struct QueryDeps<'a> {
@@ -226,8 +277,8 @@ impl<'a> QueryService<'a> {
     fn report_miss(&self, command: &str, lang: Language) -> Result<()> {
         eprintln!("{}", lang.note_not_found(command));
 
-        let all_commands = notes::list_commands(self.notes_dir)?;
-        let suggestions = notes::suggest_commands(command, &all_commands, SUGGESTION_LIMIT);
+        let found = notes::scan_commands(self.notes_dir)?;
+        let suggestions = notes::suggest_commands(command, &found.items, SUGGESTION_LIMIT);
         if !suggestions.is_empty() {
             eprintln!("{}", lang.did_you_mean(&suggestions.join(", ")));
         }
@@ -245,8 +296,8 @@ impl<'a> QueryService<'a> {
         // 关键策略：`ask_before_ai = true`（默认）表示需要用户确认，而确认必须
         // 依赖交互终端。`gg foo | less`、`gg foo > out.md` 这类场景 stdout 不是
         // 终端，若直接放行会在用户毫不知情的情况下调用 AI 并写入笔记目录。
-        // 把 `ask_before_ai` 设为 false 即视为用户显式放弃确认，允许非交互生成。
-        if self.config.ask_before_ai {
+        // 两种方式可以显式授权：把 `ask_before_ai` 设为 false，或本次加 `--yes`。
+        if self.config.ask_before_ai && !options.assume_yes {
             if !self.deps.prompter.is_interactive() {
                 eprintln!("{}", lang.ai_skipped_non_interactive());
                 return Ok(QueryOutcome::AiSkippedNonInteractive);
@@ -268,28 +319,40 @@ impl<'a> QueryService<'a> {
             .generator
             .generate(command, &self.config.ai_note_language)?;
         self.deps.renderer.render(&generated, options.target)?;
-        self.maybe_save(command, &generated)?;
+
+        if self.should_save(options)? {
+            self.save(command, &generated)?;
+        } else {
+            eprintln!("{}", lang.save_skipped());
+        }
         Ok(QueryOutcome::AiGenerated)
     }
 
-    fn maybe_save(&self, command: &str, generated: &str) -> Result<()> {
-        let lang = self.config.language();
-
-        let should_save = if self.config.ask_before_save {
-            self.deps
-                .prompter
-                .confirm(&lang.ask_save_note(), self.config.auto_save_ai)?
-        } else {
-            self.config.auto_save_ai
-        };
-
-        if !should_save {
-            eprintln!("{}", lang.save_skipped());
-            return Ok(());
+    /// 落盘决策：`--yes` 视为对所有询问回答「是」；未启用询问则按 `auto_save_ai`。
+    fn should_save(&self, options: QueryOptions) -> Result<bool> {
+        if !self.config.ask_before_save {
+            return Ok(self.config.auto_save_ai);
         }
+        if options.assume_yes {
+            return Ok(true);
+        }
+        if !self.deps.prompter.is_interactive() {
+            return Ok(self.config.auto_save_ai);
+        }
+        self.deps.prompter.confirm(
+            &self.config.language().ask_save_note(),
+            self.config.auto_save_ai,
+        )
+    }
 
+    fn save(&self, command: &str, generated: &str) -> Result<()> {
         let path = notes::write_note(self.notes_dir, command, generated)?;
-        eprintln!("{}", lang.note_saved(&path.display().to_string()));
+        eprintln!(
+            "{}",
+            self.config
+                .language()
+                .note_saved(&path.display().to_string())
+        );
         Ok(())
     }
 }
@@ -414,6 +477,14 @@ mod tests {
         QueryOptions {
             target: OutputTarget::Terminal,
             edit: false,
+            assume_yes: false,
+        }
+    }
+
+    fn yes_options() -> QueryOptions {
+        QueryOptions {
+            assume_yes: true,
+            ..options()
         }
     }
 
@@ -534,6 +605,129 @@ mod tests {
         assert!(temp.path().join("lz.md").exists());
     }
 
+    /// `--yes` 应当能授权非交互场景生成，且不产生任何询问。
+    #[test]
+    fn assume_yes_generates_non_interactively_without_prompting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            ask_before_ai: true,
+            auto_save_ai: true,
+            ask_before_save: true,
+            ..AppConfig::default()
+        };
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", yes_options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiGenerated);
+        assert_eq!(generator.call_count(), 1);
+        assert!(
+            prompter.asked().is_empty(),
+            "--yes 不应再问任何问题，实际问了: {:?}",
+            prompter.asked()
+        );
+        assert!(temp.path().join("lz.md").exists());
+    }
+
+    /// `--yes` 是对询问回答「是」，因此即使 auto_save_ai=false 也应落盘。
+    #[test]
+    fn assume_yes_overrides_auto_save_veto() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            ask_before_ai: true,
+            ask_before_save: true,
+            auto_save_ai: false,
+            ..AppConfig::default()
+        };
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", yes_options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiGenerated);
+        assert!(
+            temp.path().join("lz.md").exists(),
+            "--yes 应视为对保存询问回答「是」"
+        );
+    }
+
+    /// `--yes` 是对询问的预设回答，不能绕过 claude 是否存在的判断。
+    #[test]
+    fn assume_yes_does_not_bypass_missing_claude() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig::default();
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::missing();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", yes_options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiUnavailable);
+        assert_eq!(generator.call_count(), 0);
+    }
+
+    /// 未启用询问时（ask_before_save=false），`--yes` 不应改变 auto_save_ai 的语义。
+    #[test]
+    fn assume_yes_keeps_auto_save_ai_when_no_prompt_is_configured() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            ask_before_ai: false,
+            ask_before_save: false,
+            auto_save_ai: false,
+            ..AppConfig::default()
+        };
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", yes_options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiGenerated);
+        assert!(
+            !temp.path().join("lz.md").exists(),
+            "没配置询问时，--yes 不应把 auto_save_ai=false 变成保存"
+        );
+    }
+
     #[test]
     fn interactive_accept_saves_generated_note() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -637,6 +831,7 @@ mod tests {
                 QueryOptions {
                     target: OutputTarget::Terminal,
                     edit: true,
+                    assume_yes: false,
                 },
             )
             .expect("查询成功");
