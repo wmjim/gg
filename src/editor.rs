@@ -23,10 +23,12 @@ enum EditorFailure {
 }
 
 impl std::fmt::Display for EditorFailure {
+    /// 仅供诊断/测试打印内部原因；面向用户的文案由 `open` 走 i18n catalog 生成。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EditorFailure::NotInstalled(err) => write!(formatter, "编辑器未安装: {err:#}"),
-            EditorFailure::RunFailed(err) => write!(formatter, "{err:#}"),
+            EditorFailure::NotInstalled(err) | EditorFailure::RunFailed(err) => {
+                write!(formatter, "{err:#}")
+            }
         }
     }
 }
