@@ -70,6 +70,27 @@ pub fn open_path(path: &Path, target: OpenTarget, lang: Language) -> Result<()> 
     open_native(path, target, lang)
 }
 
+/// 启动候选程序，失败时附上「启动<目标>失败: <路径>」的本地化说明。
+///
+/// Windows 与 macOS 分支共用。这里刻意用 `anyhow::Error` 的**固有方法**
+/// `context()`，而不是 `Context` 扩展 trait 的 `with_context()`：后者需要导入
+/// trait，而该 trait 只在这两个平台的代码里被用到，于是 Linux 上会被判为
+/// 「未使用的导入」—— 一旦顺手删掉，另外两个平台就直接编译失败（踩过一次）。
+/// 用固有方法则不存在任何需要与平台门控保持同步的导入。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn spawn_opener(
+    command: &mut Command,
+    path: &Path,
+    target: OpenTarget,
+    lang: Language,
+) -> Result<()> {
+    match command.spawn() {
+        Ok(_) => Ok(()),
+        Err(err) => Err(anyhow::Error::from(err)
+            .context(lang.opener_launch_failed(&target.label(lang), &path.display().to_string()))),
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn open_native(path: &Path, target: OpenTarget, lang: Language) -> Result<()> {
     debug_log!(
@@ -87,11 +108,7 @@ fn open_native(path: &Path, target: OpenTarget, lang: Language) -> Result<()> {
         OpenTarget::Editor => Command::new("notepad.exe"),
     };
     command.arg(path);
-
-    command.spawn().with_context(|| {
-        lang.opener_launch_failed(&target.label(lang), &path.display().to_string())
-    })?;
-    Ok(())
+    spawn_opener(&mut command, path, target, lang)
 }
 
 #[cfg(target_os = "macos")]
@@ -107,11 +124,7 @@ fn open_native(path: &Path, target: OpenTarget, lang: Language) -> Result<()> {
         command.arg("-e");
     }
     command.arg(path);
-
-    command
-        .spawn()
-        .with_context(|| lang.opener_launch_failed("open", &path.display().to_string()))?;
-    Ok(())
+    spawn_opener(&mut command, path, target, lang)
 }
 
 #[cfg(target_os = "linux")]
