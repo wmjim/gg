@@ -4,7 +4,7 @@ use crate::i18n::Language;
 use crate::utils::debug_log;
 use crate::utils::platform::{self, OpenTarget};
 use crate::utils::process::resolve_program;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use pulldown_cmark::{Options, Parser, html};
 use std::fs;
 use std::io::{self, Write};
@@ -115,15 +115,29 @@ fn run_glow_via_stdin(program: &crate::utils::process::Program, markdown: &str) 
         .spawn()
         .with_context(|| format!("无法启动 `{}`", program.describe()))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(markdown.as_bytes())
-            .context("无法向 glow 写入 Markdown")?;
+    // glow 可能在读完输入前就退出（例如参数错误），此时 write_all 会得到 EPIPE。
+    // 必须无论如何都等到退出并回收，否则要么留下僵尸进程，
+    // 要么因为写失败而误判渲染失败、白白回退成原始 Markdown。
+    // 同时，ChildStdin 在该分支结束时被 drop，glow 才能看到 EOF。
+    let write_result = match child.stdin.take() {
+        Some(mut stdin) => stdin.write_all(markdown.as_bytes()),
+        None => Ok(()),
+    };
+    let status = child.wait().context("无法等待 glow 退出")?;
+
+    if let Err(err) = &write_result {
+        debug_log!("render::run_glow_via_stdin: 写入 stdin 失败: {err}");
     }
 
-    let status = child.wait().context("无法等待 glow 退出")?;
-    anyhow::ensure!(status.success(), "glow 退出码 {status}（参数: -）");
-    Ok(())
+    if status.success() {
+        return Ok(());
+    }
+
+    let detail = match write_result {
+        Ok(()) => String::new(),
+        Err(err) => format!("（写入 stdin 失败: {err}）"),
+    };
+    bail!("glow 退出码 {status}（参数: -）{detail}")
 }
 
 fn run_glow_via_file(program: &crate::utils::process::Program, markdown: &str) -> Result<()> {
@@ -136,23 +150,19 @@ fn run_glow_via_file(program: &crate::utils::process::Program, markdown: &str) -
         .context("无法写入临时 Markdown 文件")?;
     file.flush().context("无法刷新临时 Markdown 文件")?;
 
-    // glow 需要按路径读取，写入后立刻关闭句柄，避免 Windows 上的共享冲突。
-    let (_file, path) = file.keep().context("无法保留临时 Markdown 文件")?;
-    let result = Command::new(&program.bin)
+    // NamedTempFile 在作用域结束时自动删除，无需手工 remove_file。
+    let status = Command::new(&program.bin)
         .args(&program.args)
-        .arg(&path)
+        .arg(file.path())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .with_context(|| format!("无法启动 `{}`", program.describe()));
+        .with_context(|| format!("无法启动 `{}`", program.describe()))?;
 
-    let _ = fs::remove_file(&path);
-
-    let status = result?;
     anyhow::ensure!(
         status.success(),
         "glow 退出码 {status}（文件: {}）",
-        path.display()
+        file.path().display()
     );
     Ok(())
 }

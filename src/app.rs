@@ -62,9 +62,16 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             output::write_lines(io::stdout().lock(), commands)?;
             Ok(ExitCode::SUCCESS)
         }
-        Action::Search(keyword) => {
-            let commands = notes::search_commands_by_name(&notes_dir, &keyword)?;
-            output::write_lines(io::stdout().lock(), commands)?;
+        Action::Search { keyword, content } => {
+            let matches = if content {
+                notes::search_notes_by_content(&notes_dir, &keyword)?
+                    .iter()
+                    .map(notes::ContentMatch::render)
+                    .collect::<Vec<_>>()
+            } else {
+                notes::search_commands_by_name(&notes_dir, &keyword)?
+            };
+            output::write_lines(io::stdout().lock(), matches)?;
             Ok(ExitCode::SUCCESS)
         }
         Action::Query(command) => {
@@ -77,7 +84,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
 
             let renderer = MarkdownRenderer::new(lang);
             let editor = SystemEditor::from_config(&config);
-            let generator = ClaudeGenerator::new(lang);
+            let generator = ClaudeGenerator::new(lang, config.ai_timeout());
             let deps = QueryDeps {
                 renderer: &renderer,
                 editor: &editor,
@@ -199,8 +206,11 @@ impl<'a> QueryService<'a> {
         let lang = self.config.language();
 
         if options.edit {
-            let path = notes::ensure_note_file(self.notes_dir, command)?;
-            self.deps.editor.open(&path)?;
+            let ensured = notes::ensure_note_file(self.notes_dir, command)?;
+            if ensured.created {
+                eprintln!("{}", lang.note_created(&ensured.path.display().to_string()));
+            }
+            self.deps.editor.open(&ensured.path)?;
             return Ok(QueryOutcome::EditorOpened);
         }
 
@@ -252,6 +262,7 @@ impl<'a> QueryService<'a> {
         }
 
         debug_log!("app::ai_fallback: 为 `{command}` 生成笔记");
+        eprintln!("{}", lang.ai_progress(command));
         let generated = self
             .deps
             .generator

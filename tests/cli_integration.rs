@@ -42,9 +42,11 @@ fn create_fake_claude(temp: &TempDir) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     // `--version` 探测不写标记；标记存在即代表真的走到了生成路径。
+    // `GG_TEST_HANG` 用于验证ai_timeout_seconds 能终止不返回的子进程。
     let path = temp.path().join("fake-claude");
     let script = "#!/bin/sh\n\
                   if [ \"$1\" = \"--version\" ]; then echo 'claude 0.0.1'; exit 0; fi\n\
+                  if [ -n \"$GG_TEST_HANG\" ]; then sleep 30; exit 0; fi\n\
                   if [ -n \"$GG_TEST_MARKER\" ]; then echo called >> \"$GG_TEST_MARKER\"; fi\n\
                   echo '# AI Note'\n\
                   echo 'generated for testing'\n";
@@ -64,11 +66,21 @@ fn create_fake_claude(temp: &TempDir) -> PathBuf {
                     echo claude 0.0.1\r\n\
                     exit /b 0\r\n\
                   )\r\n\
+                  if not \"%GG_TEST_HANG%\"==\"\" (\r\n\
+                    ping -n 30 127.0.0.1 >nul\r\n\
+                    exit /b 0\r\n\
+                  )\r\n\
                   if not \"%GG_TEST_MARKER%\"==\"\" echo called >> \"%GG_TEST_MARKER%\"\r\n\
                   echo # AI Note\r\n\
                   echo generated for testing\r\n";
     fs::write(&path, script).expect("写入假 claude 脚本");
     path
+}
+
+fn write_config(temp: &TempDir, body: &str) {
+    let config_dir = temp.path().join("appdata").join("gg");
+    fs::create_dir_all(&config_dir).expect("创建配置目录");
+    fs::write(config_dir.join("config.toml"), body).expect("写入配置");
 }
 
 // ---------------------------------------------------------------- 基础查询
@@ -118,6 +130,228 @@ fn search_matches_file_names_only() {
     ]);
 
     cmd.assert().success().stdout("grep\n");
+}
+
+/// 默认只匹配文件名：搜索正文里的词不应命中。
+#[test]
+fn search_ignores_note_bodies_by_default() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "grep", "# grep\n正文包含关键字\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "search",
+        "关键字",
+    ]);
+
+    cmd.assert().success().stdout("");
+}
+
+#[test]
+fn search_content_flag_reports_file_line_and_text() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "grep", "# grep\n\n递归搜索目录\n递归时要小心\n");
+    write_note(&notes_dir, "ls", "# ls\n列出目录\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "search",
+        "-c",
+        "递归",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stdout("grep:3: 递归搜索目录\ngrep:4: 递归时要小心\n");
+}
+
+#[test]
+fn search_content_flag_accepts_long_form() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "aws", "AWS CLI 用法\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "search",
+        "--content",
+        "aws",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("aws:1: AWS CLI 用法"));
+}
+
+// ---------------------------------------------------------------- 编辑笔记
+
+#[test]
+fn edit_notifies_when_it_creates_an_empty_note() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+
+    // 用假编辑器，避开真实编辑器的交互阻塞。
+    let editor = temp.path().join("noop-editor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(&editor, "#!/bin/sh\nexit 0\n").expect("写假编辑器");
+        let mut perms = fs::metadata(&editor).expect("stat").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&editor, perms).expect("chmod");
+    }
+    #[cfg(windows)]
+    {
+        fs::write(&editor, "@echo off\r\nexit /b 0\r\n").expect("写假编辑器");
+    }
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_EDITOR", &editor);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "--edit",
+        "newcmd",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("已新建空笔记"));
+    assert!(notes_dir.join("newcmd.md").exists());
+}
+
+#[test]
+fn edit_does_not_claim_creation_for_an_existing_note() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let editor = temp.path().join("noop-editor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(&editor, "#!/bin/sh\nexit 0\n").expect("写假编辑器");
+        let mut perms = fs::metadata(&editor).expect("stat").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&editor, perms).expect("chmod");
+    }
+    #[cfg(windows)]
+    {
+        fs::write(&editor, "@echo off\r\nexit /b 0\r\n").expect("写假编辑器");
+    }
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_EDITOR", &editor);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "--edit",
+        "ls",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("已新建空笔记").not());
+    let content = fs::read_to_string(notes_dir.join("ls.md")).expect("读取笔记");
+    assert_eq!(content, "# ls\n", "已有笔记内容不得被清空");
+}
+
+/// 回归：README 声明的是一条优先级链
+/// `config.editor > GG_EDITOR > VISUAL > EDITOR > 终端编辑器`。
+/// 配置里的编辑器只是没装时，必须继续往下试环境变量，
+/// 而不是直接跳到 nvim。
+#[test]
+fn missing_configured_editor_falls_through_to_env_editor() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let marker = temp.path().join("env-editor-ran");
+    let env_editor = temp.path().join("env-editor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let body = format!("#!/bin/sh\necho \"$1\" > {}\n", marker.display());
+        fs::write(&env_editor, body).expect("写假编辑器");
+        let mut perms = fs::metadata(&env_editor).expect("stat").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&env_editor, perms).expect("chmod");
+    }
+    #[cfg(windows)]
+    {
+        let body = format!("@echo off\r\necho %1 > \"{}\"\r\n", marker.display());
+        fs::write(&env_editor, body).expect("写假编辑器");
+    }
+
+    write_config(
+        &temp,
+        "language = \"zh\"\neditor = \"__gg_no_such_editor__\"\n",
+    );
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_EDITOR", &env_editor);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "--edit",
+        "ls",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("__gg_no_such_editor__"));
+
+    let recorded =
+        fs::read_to_string(&marker).expect("GG_EDITOR 指定的编辑器应被调用，而不是直接跳去开 nvim");
+    assert!(
+        recorded.contains("ls.md"),
+        "应把笔记路径传给环境变量编辑器，实际: {recorded}"
+    );
+}
+
+/// 编辑器执行失败必须报错，而不是默默换一个编辑器。
+#[test]
+fn failing_editor_is_reported_instead_of_silently_falling_back() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let editor = temp.path().join("failing-editor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(&editor, "#!/bin/sh\nexit 3\n").expect("写假编辑器");
+        let mut perms = fs::metadata(&editor).expect("stat").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&editor, perms).expect("chmod");
+    }
+    #[cfg(windows)]
+    {
+        fs::write(&editor, "@echo off\r\nexit /b 3\r\n").expect("写假编辑器");
+    }
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_EDITOR", &editor);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "--edit",
+        "ls",
+    ]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("执行失败"))
+        .stderr(predicate::str::contains("退出码"));
 }
 
 // ---------------------------------------------------------------- 未命中路径
@@ -199,6 +433,37 @@ fn ai_opt_out_allows_non_interactive_generation() {
     assert!(marker.exists(), "显式选择后应当调用 claude");
     let saved = fs::read_to_string(notes_dir.join("foo.md")).expect("笔记应已保存");
     assert!(saved.contains("# AI Note"));
+}
+
+/// 不返回的 claude 必须被超时终止，而不是让 `gg` 永久挂住。
+#[test]
+fn hanging_claude_is_terminated_by_timeout() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+    write_config(
+        &temp,
+        "language = \"zh\"\nask_before_ai = false\nauto_save_ai = true\nai_timeout_seconds = 1\n",
+    );
+
+    let fake_claude = create_fake_claude(&temp);
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_CLAUDE_BIN", fake_claude);
+    cmd.env("GG_TEST_HANG", "1");
+    cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
+
+    let started = std::time::Instant::now();
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("未返回"));
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "应在超时后立即返回，实际耗时 {elapsed:?}"
+    );
+    assert!(!notes_dir.join("foo.md").exists(), "生成失败时不应写入笔记");
 }
 
 // ---------------------------------------------------------------- 配置

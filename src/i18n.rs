@@ -121,6 +121,14 @@ impl Language {
             zh: "非交互终端，已跳过 AI 回退（设置 ask_before_ai = false 可强制启用）。",
             en: "Non-interactive terminal: skipped AI fallback (set ask_before_ai = false to force it).",
         },
+        ai_progress(command: &str) => {
+            zh: "正在调用 claude 生成 `{command}` 的笔记，请稍候…",
+            en: "Asking claude to generate notes for `{command}`, please wait…",
+        },
+        claude_timeout(seconds: u64) => {
+            zh: "claude 在 {seconds} 秒内未返回，已终止进程（可调整 ai_timeout_seconds，设为 0 表示不限制）。",
+            en: "claude did not return within {seconds}s and was terminated (tune ai_timeout_seconds; 0 disables the limit).",
+        },
         claude_missing() => {
             zh: "未检测到 claude CLI，已跳过 AI 回退。",
             en: "claude CLI not found, skipped AI fallback.",
@@ -137,9 +145,9 @@ impl Language {
             zh: "是否保存这份 AI 生成笔记到本地？",
             en: "Save the AI-generated note locally?",
         },
-        claude_failed(err: &str) => {
-            zh: "claude 调用失败: {err}",
-            en: "claude invocation failed: {err}",
+        claude_failed(detail: &str) => {
+            zh: "claude 调用失败: {detail}",
+            en: "claude invocation failed: {detail}",
         },
         claude_empty_output() => {
             zh: "claude 返回了空内容。",
@@ -193,9 +201,9 @@ impl Language {
             zh: "环境变量指定的编辑器 `{editor}` 不存在，尝试系统默认编辑器。",
             en: "Editor `{editor}` from environment not found; falling back to the system default.",
         },
-        editor_launch_failed(editor: &str, err: &str) => {
-            zh: "启动编辑器 `{editor}` 失败: {err}",
-            en: "Failed to launch editor `{editor}`: {err}",
+        editor_launch_failed(editor: &str) => {
+            zh: "编辑器 `{editor}` 执行失败，未回退到其他编辑器",
+            en: "editor `{editor}` failed; not falling back to another editor",
         },
         no_editor_found() => {
             zh: "未找到可用的编辑器。请设置 GG_EDITOR/EDITOR/VISUAL，或安装 nvim/vim/helix/nano。",
@@ -214,6 +222,10 @@ impl Language {
         cli_heading_commands() => {
             zh: "命令",
             en: "Commands",
+        },
+        cli_heading_arguments() => {
+            zh: "参数",
+            en: "Arguments",
         },
         cli_heading_options() => {
             zh: "选项",
@@ -258,6 +270,14 @@ impl Language {
         cli_cmd_search_keyword() => {
             zh: "搜索关键词",
             en: "Keyword to search for",
+        },
+        cli_arg_search_content() => {
+            zh: "搜索笔记正文而非文件名",
+            en: "Search note bodies instead of file names",
+        },
+        note_created(path: &str) => {
+            zh: "已新建空笔记: {path}",
+            en: "Created an empty note: {path}",
         },
         cli_cmd_help() => {
             zh: "打印此帮助信息或指定子命令的帮助",

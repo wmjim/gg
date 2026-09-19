@@ -5,7 +5,37 @@
 //! 也不能盲目按空白切分（会破坏含空格的 Windows 绝对路径）。
 
 use anyhow::{Context, Result, anyhow, bail};
+use std::io;
 use std::path::PathBuf;
+use std::process::{Child, ExitStatus};
+use std::time::{Duration, Instant};
+
+/// 等待子进程退出的轮询间隔：兼顾响应速度与 CPU 占用。
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// 等待子进程退出，超时则杀死并回收。
+///
+/// 返回 `Ok(None)` 表示已超时（进程已被杀死且回收，不会留下僵尸）。
+/// 外部命令探测必须带超时：`claude --version` 在首次运行、交互式登录提示或
+/// 网络阻塞时可能长时间不返回，否则 `gg` 会静默挂住。
+pub fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+
+        if Instant::now() >= deadline {
+            // 进程可能在 try_wait 与 kill 之间刚好退出，此处忽略 kill 失败。
+            let _ = child.kill();
+            // 必须 wait 回收，否则留下僵尸进程。
+            let _ = child.wait();
+            return Ok(None);
+        }
+
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
 
 /// 解析后的可执行程序：真实路径 + 独立参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,5 +217,55 @@ mod tests {
         let program = resolve_program("sh").expect("resolve sh from PATH");
         assert!(program.bin.is_absolute());
         assert!(program.args.is_empty());
+    }
+
+    #[cfg(unix)]
+    fn spawn_sh(script: &str) -> Child {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .spawn()
+            .expect("启动 sh")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_timeout_returns_status_for_fast_process() {
+        let mut child = spawn_sh("exit 0");
+        let status = wait_with_timeout(&mut child, Duration::from_secs(10))
+            .expect("等待不应出错")
+            .expect("进程应正常退出");
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_timeout_kills_and_reaps_hung_process() {
+        let mut child = spawn_sh("sleep 60");
+        let start = Instant::now();
+
+        let status =
+            wait_with_timeout(&mut child, Duration::from_millis(150)).expect("等待不应出错");
+
+        assert!(status.is_none(), "超时应返回 None");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "应在超时附近立即返回，实际 {:?}",
+            start.elapsed()
+        );
+        assert!(
+            child.try_wait().expect("try_wait 不应出错").is_some(),
+            "超时后子进程必须已被回收，不能留下僵尸"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_with_timeout_does_not_flag_non_zero_exit_as_timeout() {
+        let mut child = spawn_sh("exit 7");
+        let status = wait_with_timeout(&mut child, Duration::from_secs(10))
+            .expect("等待不应出错")
+            .expect("退出码非 0 不等于超时");
+        assert_eq!(status.code(), Some(7));
     }
 }

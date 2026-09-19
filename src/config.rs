@@ -31,6 +31,8 @@ pub struct AppConfig {
     pub ask_before_save: bool,
     pub ai_note_language: String,
     pub ai_provider: AiProvider,
+    /// AI 生成的最长等待秒数；`0` 表示不限制。
+    pub ai_timeout_seconds: u64,
     pub editor: Option<String>,
     pub language: Option<Language>,
 }
@@ -43,6 +45,7 @@ impl Default for AppConfig {
             ask_before_save: false,
             ai_note_language: "zh-CN".to_string(),
             ai_provider: AiProvider::Claude,
+            ai_timeout_seconds: 180,
             editor: None,
             language: None,
         }
@@ -91,6 +94,14 @@ impl AppConfig {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
+    }
+
+    /// `ai_timeout_seconds = 0` 表示不限制等待时长。
+    pub fn ai_timeout(&self) -> Option<std::time::Duration> {
+        match self.ai_timeout_seconds {
+            0 => None,
+            seconds => Some(std::time::Duration::from_secs(seconds)),
+        }
     }
 }
 
@@ -201,6 +212,22 @@ language = "zh"
         let cfg: AppConfig = toml::from_str("editor = \"   \"").expect("合法配置");
         assert_eq!(cfg.editor_spec(), None);
         assert!(cfg.editor.is_some());
+    }
+
+    #[test]
+    fn ai_timeout_defaults_to_180s_and_zero_disables_it() {
+        use std::time::Duration;
+
+        assert_eq!(
+            AppConfig::default().ai_timeout(),
+            Some(Duration::from_secs(180))
+        );
+
+        let cfg: AppConfig = toml::from_str("ai_timeout_seconds = 0").expect("合法配置");
+        assert_eq!(cfg.ai_timeout(), None, "0 应表示不限制");
+
+        let cfg: AppConfig = toml::from_str("ai_timeout_seconds = 30").expect("合法配置");
+        assert_eq!(cfg.ai_timeout(), Some(Duration::from_secs(30)));
     }
 
     #[test]
