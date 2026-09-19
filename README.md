@@ -156,7 +156,8 @@ ask_before_ai = true      # 调用 AI 前是否询问
 auto_save_ai = true       # AI 生成后是否落盘
 ask_before_save = false   # 落盘前是否再询问一次
 ai_note_language = "zh-CN"
-ai_provider = "claude"    # 当前仅支持 claude
+ai_provider = "claude"    # claude / codex / gemini / none
+ai_command = ""           # 可选：自定义 AI 命令行，优先级高于 ai_provider
 ai_timeout_seconds = 180  # AI 生成最长等待秒数，0 表示不限制
 editor = "hx"             # 可选：默认编辑器，支持带参数，如 "code -w"
 language = "zh"           # 可选：显示语言 (zh/en)
@@ -165,21 +166,67 @@ language = "zh"           # 可选：显示语言 (zh/en)
 配置项类型是强校验的：`language = "jp"`、`ai_provider = "openai"` 会在启动时直接报错并指出问题所在文件，
 而不是静默降级成英文或跳过 AI。
 
-## Claude 回退说明
+## AI 回退说明
 
 当 `gg <cmd>` 未找到本地笔记时：
 
 1. 输出未命中提示和相近命令建议
-2. 检测 `claude` 是否可用
+2. 检查 AI 后端是否可用
 3. 在交互终端中（且 `ask_before_ai=true`）询问是否调用 AI
 4. 生成 Markdown 后输出到终端
 5. 根据保存策略保存到 `<notes_dir>/<cmd>.md`
 
-可通过 `GG_CLAUDE_BIN` 指定 Claude 可执行文件路径。
+### 后端选择
 
-生成期间会在 `stderr` 输出进度提示；超过 `ai_timeout_seconds` 仍未返回时
-会终止子进程并报错（默认 180 秒）。`claude --version` 的可用性探测则固定
-5 秒超时，避免首次运行的登录提示或网络阻塞把 `gg` 拖住。
+AI 后端不写死，可用 `ai_provider` 选预设，或用 `ai_command` 完全自定义：
+
+| `ai_provider` | 实际执行 |
+|---|---|
+| `claude`（默认） | `claude -p --output-format text <提示词>` |
+| `codex` | `codex exec <提示词>` |
+| `gemini` | `gemini -p <提示词>` |
+| `none` | **关闭 AI 回退**，未命中时只给相近命令建议 |
+
+提示词一律追加为最后一个参数 —— `claude -p` / `codex exec` / `gemini -p` /
+`llm` / `aichat` / `ollama run <model>` 都符合这个约定。
+
+需要别的形态时用 `ai_command`（优先级高于预设，包括 `none`）：
+
+```toml
+ai_command = "llm -m gpt-4o"              # 提示词追加到末尾
+ai_command = "ollama run qwen2.5"         # 同上
+ai_command = "my-tool --flag {prompt}"    # 用 {prompt} 指定插入位置
+```
+
+只想换可执行文件、保留预设参数时用 `GG_AI_BIN`：
+
+```bash
+GG_AI_BIN=/opt/claude/bin/claude gg foo    # 仍带 -p --output-format text
+```
+
+`GG_CLAUDE_BIN` 作为旧名仍然兼容。
+
+### 提示词与输出风格
+
+提示词的目标是**贴近手写笔记的密度**，而不是生成教程。以本仓库作者手写的
+`pwd.md` 为基准（7 行）约束模型：只列 2~4 个最高频选项、每段代码块只放一条
+命令、全文 10~25 行，并明确禁止小节标题、表格、emoji、"总之/综上"、
+命令历史来源介绍与「强大的/常用的」这类形容。
+
+模型如果仍然在首行加了 `# xxx 命令速查`，`gg` 会在保存前剥掉该标题、
+清理行尾空格并折叠多余空行 —— 所以提示词和代码各兜一层，结果稳定。
+
+### 等待反馈
+
+生成期间 `stderr` 会显示转圈动画与已等待秒数：
+
+```text
+⠹ 正在生成 `rsync` 的笔记 [7s]
+```
+
+只在 `stderr` 是终端且 `TERM != dumb` 时启用；管道或重定向场景退化为一行
+静态提示，不会往日志里塞控制字符。超过 `ai_timeout_seconds` 仍未返回时会
+终止子进程并报错（默认 180 秒，设 0 表示不限制）。
 
 ### 非交互终端的保护策略
 
@@ -320,12 +367,13 @@ src/
   notes.rs          笔记仓储层（扫描、读写、正文搜索、模糊建议）
   render.rs         Markdown 渲染（终端 glow / 浏览器）
   editor.rs         编辑器启动与回退链
-  ai.rs             Claude 笔记生成
+  ai.rs             AI 笔记生成（多后端 + 提示词 + 输出清洗）
   prompt.rs         交互提示端口
   utils/
     process.rs      可执行命令字符串解析与带超时的子进程等待
     platform.rs     跨平台「打开路径」（含 WSL 互操作）
     layout.rs       终端多列布局（对齐 ls 的列内纵向填充）
+    spinner.rs      等待 AI 时的转圈动画
     output.rs       stdout 写入，吸收 EPIPE
   assets/
     note_template.html   浏览器渲染模板
