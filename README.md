@@ -146,6 +146,23 @@ ai_command = "my-tool --flag {prompt}"    # 或用 {prompt} 指定位置
 # ai_command = 'C:\Tools\my-tool.exe --flag'
 ```
 
+### 自定义提示词
+
+提示词内置在程序里；在配置目录放一份 `AGENTS.md` 即可整体替换（文件不存在或内容只有空白时用内置默认）：
+
+| 平台 | 位置 |
+|---|---|
+| Linux | `~/.config/gg/AGENTS.md` |
+| macOS | `~/Library/Application Support/gg/AGENTS.md` |
+| Windows | `%APPDATA%\gg\AGENTS.md` |
+
+文件里可用 `{{command}}`（命令名）与 `{{language}}`（输出语言）两个占位符：
+
+```markdown
+你是命令行速查笔记编辑。为命令 `{{command}}` 输出一份 Markdown 速查笔记，输出语言 {{language}}。
+只列 2~4 个最高频选项，再给 1~3 个可直接运行的示例。
+```
+
 **非交互终端不会静默调用 AI**：`gg foo | less` 或 `gg foo > out.md` 这类场景
 没有用户可确认，会跳过 AI 并返回退出码 3。脚本里需要自动化就显式加 `-y`，
 或把 `ask_before_ai` 设为 `false`。

@@ -369,6 +369,10 @@ impl Language {
             zh: "AI 回退已关闭",
             en: "AI fallback is disabled",
         },
+        prompt_read_failed(path: &str) => {
+            zh: "无法读取提示词文件: {path}",
+            en: "Failed to read the prompt file: {path}",
+        },
         ai_wait_failed() => {
             zh: "无法等待 AI 命令退出",
             en: "Failed to wait for the AI command to exit",

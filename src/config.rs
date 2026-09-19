@@ -230,12 +230,22 @@ fn language_from_config_at(path: &Path) -> Option<Language> {
     toml::from_str::<Peek>(&raw).ok()?.language
 }
 
+/// gg 的应用目录：`config.toml`、`notes/` 与 `AGENTS.md` 都在这里。
+fn app_dir(lang: Language) -> Result<PathBuf> {
+    Ok(config_root_dir(lang)?.join("gg"))
+}
+
 pub fn config_path(lang: Language) -> Result<PathBuf> {
-    Ok(config_root_dir(lang)?.join("gg").join("config.toml"))
+    Ok(app_dir(lang)?.join("config.toml"))
 }
 
 pub fn default_notes_dir(lang: Language) -> Result<PathBuf> {
-    Ok(config_root_dir(lang)?.join("gg").join("notes"))
+    Ok(app_dir(lang)?.join("notes"))
+}
+
+/// AI 生成笔记用的提示词文件；不存在或为空时回落内置默认。
+pub fn prompt_path(lang: Language) -> Result<PathBuf> {
+    Ok(app_dir(lang)?.join("AGENTS.md"))
 }
 
 pub fn resolve_notes_dir(cli_override: Option<PathBuf>, lang: Language) -> Result<PathBuf> {

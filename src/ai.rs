@@ -8,13 +8,18 @@ use crate::i18n::Language;
 use crate::utils::debug_log;
 use crate::utils::process::{Program, resolve_program, split_command_line, wait_with_timeout};
 use anyhow::{Context, Result, anyhow, bail};
+use std::fs;
 use std::io::Read;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 /// 提示词占位符，用于把提示词插到参数中间。
 const PROMPT_PLACEHOLDER: &str = "{prompt}";
+
+/// 内置提示词。用户可以在配置目录放一份 `AGENTS.md` 覆盖它。
+const DEFAULT_PROMPT: &str = include_str!("assets/default_prompt.md");
 
 /// AI 笔记生成端口。
 pub trait NoteGenerator {
@@ -131,6 +136,16 @@ impl AiNoteGenerator {
         AiCommand::parse(&self.spec, self.lang)
             .with_context(|| self.lang.ai_resolve_failed(&self.spec))
     }
+
+    /// 本次生成要用的提示词模板：配置目录下的 `AGENTS.md`，
+    /// 不存在或为空时用内置默认。
+    fn prompt_template(&self) -> Result<String> {
+        match crate::config::prompt_path(self.lang) {
+            Ok(path) => load_prompt_template(&path, self.lang),
+            // 配置目录定位不到，也就没有用户模板可用。
+            Err(_) => Ok(DEFAULT_PROMPT.to_string()),
+        }
+    }
 }
 
 impl NoteGenerator for AiNoteGenerator {
@@ -161,7 +176,7 @@ impl NoteGenerator for AiNoteGenerator {
             self.timeout
         );
 
-        let prompt = build_prompt(command, language);
+        let prompt = build_prompt(command, language, &self.prompt_template()?);
         let mut child = ai_command
             .command_for(&prompt)
             // stdout 与 stderr 都用内部管道：子进程会继承这两个句柄，
@@ -278,35 +293,35 @@ pub fn sanitize_generated_note(markdown: &str) -> String {
     output
 }
 
-fn build_prompt(command: &str, language: &str) -> String {
-    format!(
-        "你是命令行速查笔记编辑。为命令 `{command}` 输出一份 Markdown 速查笔记。\
-         直接输出笔记正文，不要任何前言、说明或收尾语。\n\
-         \n\
-         必须严格采用以下结构，不要增删章节：\n\
-         1. 第一行：`命令名`：一句话说明它做什么，40 字以内。\n\
-         2. 空行后，用无序列表只列 2~4 个最高频的选项，每项形如 `-x`：用途。低频选项不要写。\n\
-         3. 空行后，给 1~3 个 ```bash 代码块，每个代码块只放一条可直接运行的命令；必要时在其上方加一行以 # 开头的说明。\n\
-         4. 只有当输出格式需要解释时（例如 `ls -l` 长格式各字段的含义），才在最后补 3~6 行简短说明。\n\
-         \n\
-         硬性约束：\n\
-         - 全文 10~25 行，宁少勿多。\n\
-         - 不要出现 简介/语法/常用参数/示例/注意事项/总结 这类小节标题。\n\
-         - 不要用表格，除非多个选项需要横向对照。\n\
-         - 不要介绍命令的历史、来源、所属项目；不要用「强大的」「常用的」「非常重要」这类形容。\n\
-         - 不要 emoji，不要「总之」「综上」，不要客套或鼓励式语气，不要重复已说过的信息。\n\
-         - 命令示例必须真实可运行，不要写行尾空格。\n\
-         - 输出语言：{language}。\n\
-         \n\
-         风格参考（别人手写的 pwd 笔记，只示意结构与信息密度，不要照抄内容）：\n\
-         `pwd`：显示**当前工作目录**的路径，即显示所在位置的**绝对路径**。\n\
-         \n\
-         ```bash\n\
-         # 查看当前工作目录路径\n\
-         $ pwd\n\
-         /home/wm\n\
-         ```\n"
-    )
+/// 把命令与输出语言填进提示词模板。
+///
+/// `{{language}}` 先替换、`{{command}}` 最后替换：命令名允许包含除空白与
+/// 路径分隔符之外的任意字符，若先填命令名，名字里的 `{{language}}` 会被二次
+/// 展开（`note_template.html` 的 `{{body}}` 出于同样原因放在最后替换）。
+fn build_prompt(command: &str, language: &str, template: &str) -> String {
+    template
+        .replace("{{language}}", language)
+        .replace("{{command}}", command)
+}
+
+/// 读取用户自定义的提示词模板。
+///
+/// 路径不存在、或内容只有空白时回落到内置默认 —— 空模板等于让模型收到一条
+/// 没有任何指令的请求，几乎一定是误操作。其余读取错误（权限等）直接上报：
+/// 用户已经显式定制了它，静默忽略比报错更糟。
+fn load_prompt_template(path: &Path, lang: Language) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(raw) if !raw.trim().is_empty() => Ok(raw),
+        Ok(_) => {
+            debug_log!(
+                "ai::load_prompt_template: {} 为空，改用内置提示词",
+                path.display()
+            );
+            Ok(DEFAULT_PROMPT.to_string())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(DEFAULT_PROMPT.to_string()),
+        Err(err) => Err(err).with_context(|| lang.prompt_read_failed(&path.display().to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -315,7 +330,7 @@ mod tests {
 
     #[test]
     fn prompt_requires_the_concise_structure() {
-        let prompt = build_prompt("grep", "zh-CN");
+        let prompt = build_prompt("grep", "zh-CN", DEFAULT_PROMPT);
 
         for expected in [
             "grep",
@@ -334,17 +349,79 @@ mod tests {
         }
     }
 
+    /// 内置模板必须带齐两个占位符，否则命中注释里的“删掉占位符”就要重建默认。
+    #[test]
+    fn default_prompt_carries_both_placeholders() {
+        assert!(
+            DEFAULT_PROMPT.contains("{{command}}"),
+            "缺少 {{{{command}}}}"
+        );
+        assert!(
+            DEFAULT_PROMPT.contains("{{language}}"),
+            "缺少 {{{{language}}}}"
+        );
+    }
+
     /// 旧提示词要求「简介 + 常用参数 + 至少 5 个示例 + 注意事项」，
     /// 正是内容膨胀的根源，回归时不要把它加回来。
     #[test]
     fn prompt_no_longer_demands_at_least_five_examples() {
-        let prompt = build_prompt("ls", "zh-CN");
+        let prompt = build_prompt("ls", "zh-CN", DEFAULT_PROMPT);
         assert!(!prompt.contains("至少5个"), "不应再要求至少 5 个示例");
     }
 
     #[test]
     fn prompt_is_usable_for_any_language() {
-        assert!(build_prompt("ls", "en").contains("en"));
+        assert!(build_prompt("ls", "en", DEFAULT_PROMPT).contains("en"));
+    }
+
+    /// 自定义模板完全替换内置内容，占位符按位置展开。
+    #[test]
+    fn custom_template_replaces_the_builtin_one() {
+        let template = "请为 `{{command}}` 写笔记，输出语言 {{language}}。";
+        let prompt = build_prompt("grep", "en", template);
+
+        assert_eq!(prompt, "请为 `grep` 写笔记，输出语言 en。");
+        assert!(!prompt.contains("10~25 行"), "不应混入内置模板内容");
+    }
+
+    /// 命令名可以合法地包含 `{{language}}` 这种字面量，不能因此被二次展开。
+    #[test]
+    fn command_name_is_substituted_last() {
+        let template = "命令={{command}} 语言={{language}}";
+        let prompt = build_prompt("{{language}}", "en", template);
+
+        assert_eq!(prompt, "命令={{language}} 语言=en");
+    }
+
+    #[test]
+    fn missing_prompt_file_falls_back_to_the_builtin_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("AGENTS.md");
+
+        let template = load_prompt_template(&missing, Language::Zh).expect("缺失不算错误");
+        assert_eq!(template, DEFAULT_PROMPT, "缺失时应回落到内置默认");
+    }
+
+    #[test]
+    fn prompt_file_overrides_the_builtin_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("AGENTS.md");
+        fs::write(&path, "自定义提示词 {{command}}\n").expect("写提示词");
+
+        let template = load_prompt_template(&path, Language::Zh).expect("读取成功");
+        assert_eq!(template, "自定义提示词 {{command}}\n");
+    }
+
+    /// 空文件几乎一定是误操作，应回落到内置默认，而不是发一条没有任何指令的请求。
+    #[test]
+    fn blank_prompt_file_falls_back_to_the_builtin_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("AGENTS.md");
+        fs::write(&path, "   \n\n").expect("写空提示词");
+
+        let template = load_prompt_template(&path, Language::Zh).expect("空文件不算错误");
+        assert_eq!(template, DEFAULT_PROMPT);
     }
 
     /// 用临时假可执行文件而不是 `sh`：`sh` 在 Windows 上并非必然存在，
