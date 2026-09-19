@@ -3,6 +3,7 @@ pub mod output;
 pub mod platform;
 pub mod process;
 pub mod spinner;
+pub mod syntax;
 
 /// 统一调试日志：仅当 `GG_DEBUG` 存在时输出。
 ///
