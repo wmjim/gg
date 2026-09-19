@@ -244,9 +244,12 @@ fn config_dir_override() -> Option<PathBuf> {
 }
 
 fn config_dir_override_from(mut lookup: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
+    // 刻意**不**要求绝对路径：这是用户显式写的值，静默忽略比「按相对路径处理」
+    // 更糟（Windows 上 `/custom` 这类写法 is_absolute() 为假，会被无声丢弃）。
+    // 需要校验绝对路径的是下面的环境变量兜底 —— 那里的 XDG 规范本就要求绝对路径。
     lookup("GG_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
 }
 
 /// `dirs` 拿不到时的兜底，读的是语义相同的环境变量。
@@ -410,19 +413,30 @@ language = "zh"
 
     #[test]
     fn gg_config_dir_overrides_the_platform_default() {
-        let lookup =
-            |key: &str| (key == "GG_CONFIG_DIR").then(|| OsString::from("/custom/gg-config"));
+        // 平台中立：不能用 `/custom/...` 这类 POSIX 风格路径，Windows 上
+        // `is_absolute()` 对它为假，用例会随平台飘。
+        let from = |value: Option<&str>| {
+            let value = value.map(OsString::from);
+            config_dir_override_from(move |_| value.clone())
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let custom = temp.path().to_path_buf();
         assert_eq!(
-            config_dir_override_from(lookup),
-            Some(PathBuf::from("/custom/gg-config"))
+            config_dir_override_from({
+                let custom = custom.clone().into_os_string();
+                move |_| Some(custom.clone())
+            }),
+            Some(custom)
         );
 
-        // 相对路径不构成可用的配置根
+        assert_eq!(from(None), None);
+        assert_eq!(from(Some("")), None, "空值不算覆盖");
+        // 相对路径也照样采用：显式配置不该被无声丢弃
         assert_eq!(
-            config_dir_override_from(|_| Some(OsString::from("relative"))),
-            None
+            from(Some("relative-config")),
+            Some(PathBuf::from("relative-config"))
         );
-        assert_eq!(config_dir_override_from(|_| None), None);
     }
 
     #[test]
