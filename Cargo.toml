@@ -2,22 +2,41 @@
 name = "gg"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "像 man 一样查询你自己的命令笔记 / Query your own command notes like man"
+license = "MIT"
+repository = "https://github.com/wmjim/gg"
+readme = "README.md"
+keywords = ["cli", "notes", "man", "markdown", "cheatsheet"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.5.60", features = ["derive"] }
 dirs = "6.0.0"
-regex = "1.11"
+humantime = "2.1.0"
 pulldown-cmark = "0.11.3"
 serde = { version = "1.0.228", features = ["derive"] }
+shell-words = "1.1.0"
 strsim = "0.11.1"
+tempfile = "3.26.0"
 toml = "1.0.6"
 which = "7.0"
 
 [dev-dependencies]
 assert_cmd = "2.1.2"
 predicates = "3.1.4"
-tempfile = "3.26.0"
 
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
 
+[lints.rust]
+unsafe_code = "forbid"
 
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
