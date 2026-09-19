@@ -53,7 +53,7 @@ pub enum AiInvocation {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub ask_before_ai: bool,
     pub auto_save_ai: bool,
@@ -403,6 +403,16 @@ language = "zh"
 
         let cfg: AppConfig = toml::from_str("ai_timeout_seconds = 30").expect("合法配置");
         assert_eq!(cfg.ai_timeout(), Some(Duration::from_secs(30)));
+    }
+
+    /// 键名拼错必须报错，而不是被当成默认值静默忽略 —— README 承诺
+    /// 「取值写错会在启动时直接报错」，而拼错键名正是最常见的写错形式。
+    #[test]
+    fn unknown_keys_are_rejected_instead_of_silently_ignored() {
+        let err =
+            toml::from_str::<AppConfig>("ask_befor_ai = false").expect_err("拼错的键名必须报错");
+        let msg = format!("{err}");
+        assert!(msg.contains("ask_befor_ai"), "实际信息: {msg}");
     }
 
     #[test]
