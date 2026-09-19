@@ -26,15 +26,34 @@ pub fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<Opt
         }
 
         if Instant::now() >= deadline {
-            // 进程可能在 try_wait 与 kill 之间刚好退出，此处忽略 kill 失败。
-            let _ = child.kill();
-            // 必须 wait 回收，否则留下僵尸进程。
-            let _ = child.wait();
+            terminate(child);
             return Ok(None);
         }
 
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// 终止子进程并回收，连它的后代一并处理。
+///
+/// `Child::kill` 只终止直接子进程。若被启动的是 Windows 批处理脚本，
+/// 脚本里的 `ping` / `sleep` 会活下来 —— 而且它们还持有从本进程继承来的
+/// 标准输出/错误句柄（Windows 没有 `dup2` 语义，`bInheritHandles` 会把父进程
+/// 的管道句柄一并传下去）。后果是：本进程已经超时退出，调用方却读不到 EOF，
+/// 管道要等到孙进程自己结束才收尾（实测 `gg` 退出用 1 秒，管道却等了 29 秒）。
+fn terminate(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    {
+        let pid = child.id().to_string();
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid])
+            .output();
+    }
+
+    // 进程可能在 try_wait 与 kill 之间刚好退出，此处忽略 kill 失败。
+    let _ = child.kill();
+    // 必须 wait 回收，否则留下僵尸进程。
+    let _ = child.wait();
 }
 
 /// 解析后的可执行程序：真实路径 + 独立参数。
