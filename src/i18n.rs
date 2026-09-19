@@ -283,8 +283,8 @@ impl Language {
             en: "Set the default editor and save it to the config",
         },
         cli_arg_yes() => {
-            zh: "对所有询问自动回答「是」（会跳过 AI 生成与保存的确认）",
-            en: "Answer yes to every prompt (skips the AI generation and save confirmations)",
+            zh: "对所有询问自动回答「是」（含 AI 生成、保存与删除的确认）",
+            en: "Answer yes to every prompt (AI generation, saving and removal confirmations)",
         },
         cli_arg_lang() => {
             zh: "设置显示语言 (zh/en) 并保存到配置",
