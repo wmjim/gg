@@ -7,7 +7,6 @@ use crate::utils::process::{Program, resolve_program};
 use anyhow::{Context, Result, bail};
 use std::env;
 use std::path::Path;
-use std::process::Command;
 
 /// 编辑器端口，便于测试时替换为假实现。
 pub trait EditorLauncher {
@@ -124,6 +123,10 @@ fn env_editor_spec() -> Option<String> {
 fn open_with_system_default(path: &Path, lang: Language) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
+        // `Command` 只在这个平台分支里用到，导入放在分支内：
+        // 放在文件顶部会在别的平台上被判为未使用的导入。
+        use std::process::Command;
+
         // 终端编辑器优先，避免在 WSL / 无桌面环境下误开 GUI 程序。
         for editor in ["nvim", "vim", "vi", "hx", "helix", "nano"] {
             if which::which(editor).is_err() {
@@ -147,7 +150,14 @@ fn open_with_system_default(path: &Path, lang: Language) -> Result<()> {
     platform::open_path(path, OpenTarget::Editor, lang).with_context(|| lang.no_editor_found())
 }
 
-#[cfg(test)]
+/// 编辑器单元测试整体只在 Unix 上编译。
+///
+/// 这些用例依赖 POSIX 进程语义：shell 脚本、可执行位、以及并行 fork 导致的
+/// ETXTBSY 竞态，无法在 Windows 上表达。Windows 的编辑器行为由集成测试覆盖
+/// （`failing_editor_is_reported_instead_of_silently_falling_back` 等）。
+/// 把整个模块门控起来，也避免在 Windows 上因所有用例都被 cfg 掉而留下
+/// 未使用的导入。
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;

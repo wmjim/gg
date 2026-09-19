@@ -217,15 +217,35 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    #[cfg(unix)]
-    fn install_fake_bin(dir: &Path, name: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
+    /// 造一个可执行文件，返回其路径。
+    ///
+    /// Windows 上可执行文件必须带可执行扩展名（这里补 `.cmd`，`which` 也据此
+    /// 判定可执行），Unix 上需要补可执行位。
+    fn write_fake_bin(dir: &Path, name: &str) -> PathBuf {
+        let name = if cfg!(windows) {
+            format!("{name}.cmd")
+        } else {
+            name.to_string()
+        };
         let path = dir.join(name);
-        fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake bin");
-        let mut perm = fs::metadata(&path).expect("stat fake bin").permissions();
-        perm.set_mode(0o755);
-        fs::set_permissions(&path, perm).expect("chmod fake bin");
+        let body = if cfg!(windows) {
+            "@echo off\r\n"
+        } else {
+            "#!/bin/sh\nexit 0\n"
+        };
+        fs::write(&path, body).expect("写假可执行文件");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perm = fs::metadata(&path)
+                .expect("stat 假可执行文件")
+                .permissions();
+            perm.set_mode(0o755);
+            fs::set_permissions(&path, perm).expect("chmod 假可执行文件");
+        }
+
         path
     }
 
@@ -245,7 +265,7 @@ mod tests {
     #[test]
     fn splits_program_and_arguments() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let bin = install_fake_bin(temp.path(), "gg-fake-editor");
+        let bin = write_fake_bin(temp.path(), "gg-fake-editor");
         let spec = format!("{} -w --flag", bin.display());
 
         let program = resolve_program(&spec).expect("resolve split spec");
@@ -257,7 +277,7 @@ mod tests {
     #[test]
     fn keeps_unquoted_path_with_spaces_intact() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let bin = install_fake_bin(temp.path(), "my editor");
+        let bin = write_fake_bin(temp.path(), "my editor");
 
         let program = resolve_program(&bin.display().to_string()).expect("resolve spaced path");
         assert_eq!(program.bin, bin);
@@ -268,7 +288,7 @@ mod tests {
     #[test]
     fn supports_quoted_path_with_spaces_plus_arguments() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let bin = install_fake_bin(temp.path(), "my editor");
+        let bin = write_fake_bin(temp.path(), "my editor");
         let spec = format!("\"{}\" -w", bin.display());
 
         let program = resolve_program(&spec).expect("resolve quoted spec");
@@ -283,7 +303,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let nested = temp.path().join("my tools");
         fs::create_dir_all(&nested).expect("创建带空格的目录");
-        let bin = install_fake_bin(&nested, "recorder");
+        let bin = write_fake_bin(&nested, "recorder");
         let spec = format!("{} -w --flag", bin.display());
 
         let program = resolve_program(&spec).expect("resolve unquoted spaced spec");
@@ -331,13 +351,9 @@ mod tests {
     #[test]
     fn resolves_windows_style_spec_with_arguments() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let bin = if cfg!(windows) {
-            let path = temp.path().join("fake.cmd");
-            fs::write(&path, "@echo off\r\n").expect("写脚本");
-            path
-        } else {
-            install_fake_bin(temp.path(), "fake.cmd")
-        };
+        // 交给平台中立的夹具决定扩展名，避免用 cfg! 去分支调用
+        // 只在某个平台存在的函数
+        let bin = write_fake_bin(temp.path(), "fake");
 
         let spec = format!("{} -p --output-format text", bin.display());
         let program = resolve_program(&spec).expect("解析成功");
