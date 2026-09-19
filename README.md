@@ -141,6 +141,9 @@ $ gg rsync
 ```toml
 ai_command = "llm -m gpt-4o"
 ai_command = "my-tool --flag {prompt}"    # 或用 {prompt} 指定位置
+
+# Windows 路径含反斜杠，用 TOML 字面量字符串（单引号）免转义：
+# ai_command = 'C:\Tools\my-tool.exe --flag'
 ```
 
 **非交互终端不会静默调用 AI**：`gg foo | less` 或 `gg foo > out.md` 这类场景
