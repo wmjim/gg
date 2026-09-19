@@ -197,7 +197,7 @@ pub fn resolve_notes_dir(cli_override: Option<PathBuf>) -> Result<PathBuf> {
     resolve_notes_dir_with(
         cli_override,
         env::var_os("GG_NOTES_DIR"),
-        dirs::config_dir(),
+        system_config_dir(),
     )
 }
 
@@ -219,7 +219,53 @@ pub(crate) fn resolve_notes_dir_with(
 }
 
 fn config_root_dir() -> Result<PathBuf> {
-    dirs::config_dir().context("无法确定系统配置目录")
+    system_config_dir().context("无法确定系统配置目录")
+}
+
+/// 系统配置根目录，按以下优先级取值：
+///
+/// 1. `GG_CONFIG_DIR` —— 显式覆盖，便于可移植部署与测试
+/// 2. `dirs::config_dir()` —— 平台标准位置
+/// 3. 环境变量兜底 —— 见 [`env_config_dir`]
+///
+/// 第 3 步**不是多余的保险**：Windows 上 `dirs` 走 `SHGetKnownFolderPath`，
+/// 完全不看 `APPDATA`，在受限环境（CI 容器、服务账户）里会直接失败，导致
+/// `gg` 在没有 `--notes-dir` 时整个不可用；而 Linux 上 `dirs` 读的是
+/// `XDG_CONFIG_HOME`，所以本地一路绿灯，问题只在别的平台暴露。
+fn system_config_dir() -> Option<PathBuf> {
+    config_dir_override()
+        .or_else(dirs::config_dir)
+        .or_else(env_config_dir)
+}
+
+/// `GG_CONFIG_DIR` 显式覆盖，优先级最高。
+fn config_dir_override() -> Option<PathBuf> {
+    config_dir_override_from(|key| env::var_os(key))
+}
+
+fn config_dir_override_from(mut lookup: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
+    lookup("GG_CONFIG_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+/// `dirs` 拿不到时的兜底，读的是语义相同的环境变量。
+fn env_config_dir() -> Option<PathBuf> {
+    env_config_dir_from(|key| env::var_os(key))
+}
+
+/// 从给定的查找函数解析兜底目录；参数化是为了脱离进程环境做测试。
+fn env_config_dir_from(mut lookup: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let absolute =
+        |value: Option<OsString>| value.map(PathBuf::from).filter(|path| path.is_absolute());
+
+    // 用 cfg!（编译期常量）而不是 #[cfg] 分块：后者会让「哪一块是尾表达式」
+    // 随平台变化，也人为地制造出只在一个平台存在的代码路径。
+    if cfg!(windows) {
+        return absolute(lookup("APPDATA"));
+    }
+    absolute(lookup("XDG_CONFIG_HOME"))
+        .or_else(|| absolute(lookup("HOME")).map(|home| home.join(".config")))
 }
 
 fn ai_bin_override() -> Option<String> {
@@ -312,6 +358,71 @@ language = "zh"
         let raw = toml::to_string_pretty(&cfg).expect("序列化");
         let parsed: AppConfig = toml::from_str(&raw).expect("反序列化");
         assert_eq!(parsed, cfg);
+    }
+
+    /// `dirs` 失败时兜底必须能拿到配置目录，否则没有 `--notes-dir` 的调用会
+    /// 整体失败（Windows 上 `SHGetKnownFolderPath` 在受限环境里可能失效）。
+    #[test]
+    fn env_config_dir_uses_the_platform_key() {
+        if cfg!(windows) {
+            let appdata = |key: &str| {
+                (key == "APPDATA").then(|| OsString::from(r"C:\Users\x\AppData\Roaming"))
+            };
+            assert_eq!(
+                env_config_dir_from(appdata),
+                Some(PathBuf::from(r"C:\Users\x\AppData\Roaming"))
+            );
+            assert_eq!(env_config_dir_from(|_| None), None);
+            return;
+        }
+
+        let both = |key: &str| match key {
+            "XDG_CONFIG_HOME" => Some(OsString::from("/custom/config")),
+            "HOME" => Some(OsString::from("/home/someone")),
+            _ => None,
+        };
+        assert_eq!(
+            env_config_dir_from(both),
+            Some(PathBuf::from("/custom/config")),
+            "XDG_CONFIG_HOME 应优先"
+        );
+
+        let only_home = |key: &str| match key {
+            "HOME" => Some(OsString::from("/home/someone")),
+            _ => None,
+        };
+        assert_eq!(
+            env_config_dir_from(only_home),
+            Some(PathBuf::from("/home/someone/.config"))
+        );
+
+        let relative = |key: &str| match key {
+            "XDG_CONFIG_HOME" => Some(OsString::from("relative")),
+            "HOME" => Some(OsString::from("also-relative")),
+            _ => None,
+        };
+        assert_eq!(
+            env_config_dir_from(relative),
+            None,
+            "相对路径不构成可用目录"
+        );
+    }
+
+    #[test]
+    fn gg_config_dir_overrides_the_platform_default() {
+        let lookup =
+            |key: &str| (key == "GG_CONFIG_DIR").then(|| OsString::from("/custom/gg-config"));
+        assert_eq!(
+            config_dir_override_from(lookup),
+            Some(PathBuf::from("/custom/gg-config"))
+        );
+
+        // 相对路径不构成可用的配置根
+        assert_eq!(
+            config_dir_override_from(|_| Some(OsString::from("relative"))),
+            None
+        );
+        assert_eq!(config_dir_override_from(|_| None), None);
     }
 
     #[test]
