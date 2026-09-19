@@ -98,18 +98,25 @@ impl Language {
             en: "Please answer y or n.",
         },
 
-        // ---------- 查询 ----------
         note_not_found(command: &str) => {
-            zh: "未找到命令 `{command}` 的笔记。",
-            en: "No notes found for command `{command}`.",
+            zh: "未找到命令 `{command}`，",
+            en: "No notes for `{command}`, ",
         },
         did_you_mean(list: &str) => {
-            zh: "你可能想查: {list}",
-            en: "Did you mean: {list}",
+            zh: "推荐:\n{list}",
+            en: "recommend:\n{list}",
+        },
+        note_not_found_alone(command: &str) => {
+            zh: "未找到命令 `{command}`。",
+            en: "No notes for `{command}`.",
         },
         note_saved(path: &str) => {
             zh: "已保存笔记: {path}",
             en: "Notes saved: {path}",
+        },
+        note_ready_hint(command: &str) => {
+            zh: "用 `gg {command}` 查看",
+            en: "View it with `gg {command}`",
         },
         notes_skipped(count: &str) => {
             zh: "有 {count} 个条目无法读取，已跳过（用 GG_DEBUG=1 查看详情）。",
@@ -328,14 +335,12 @@ mod tests {
 
     #[test]
     fn catalog_interpolates_arguments() {
-        assert_eq!(
-            Language::Zh.note_not_found("lz"),
-            "未找到命令 `lz` 的笔记。"
-        );
-        assert_eq!(
-            Language::En.note_not_found("lz"),
-            "No notes found for command `lz`."
-        );
+        assert_eq!(Language::Zh.note_not_found("lz"), "未找到命令 `lz`，");
+        assert_eq!(Language::En.note_not_found("lz"), "No notes for `lz`, ");
+        assert_eq!(Language::Zh.did_you_mean("ls, less"), "推荐:\nls, less");
+        assert_eq!(Language::Zh.note_not_found_alone("lz"), "未找到命令 `lz`。");
+        // 没有相近命令时不应留下悬空的分隔符
+        assert!(!Language::Zh.note_not_found_alone("lz").contains('，'));
     }
 
     #[test]

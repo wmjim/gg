@@ -21,6 +21,21 @@ use std::process::ExitCode;
 
 const SUGGESTION_LIMIT: usize = 5;
 
+/// 未命中提示与相近建议的文案。
+///
+/// 两条消息拼在同一行（`未找到命令 \`lz\`，推荐:`），只把建议列表放到下一行；
+/// 没有相近命令时用完整句子收尾，不留悬空的分隔符。
+fn miss_message(command: &str, suggestions: &[String], lang: Language) -> String {
+    if suggestions.is_empty() {
+        return lang.note_not_found_alone(command);
+    }
+    format!(
+        "{}{}",
+        lang.note_not_found(command),
+        lang.did_you_mean(&suggestions.join(", "))
+    )
+}
+
 /// 拿不到真实终端宽度时的兜底列数。
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
@@ -279,13 +294,9 @@ impl<'a> QueryService<'a> {
     }
 
     fn report_miss(&self, command: &str, lang: Language) -> Result<()> {
-        eprintln!("{}", lang.note_not_found(command));
-
         let found = notes::scan_commands(self.notes_dir)?;
         let suggestions = notes::suggest_commands(command, &found.items, SUGGESTION_LIMIT);
-        if !suggestions.is_empty() {
-            eprintln!("{}", lang.did_you_mean(&suggestions.join(", ")));
-        }
+        eprintln!("{}", miss_message(command, &suggestions, lang));
         Ok(())
     }
 
@@ -326,12 +337,16 @@ impl<'a> QueryService<'a> {
 
         debug_log!("app::ai_fallback: 为 `{command}` 生成笔记");
         let generated = self.generate_with_progress(command, lang)?;
-        self.deps.renderer.render(&generated, options.target)?;
 
         if self.should_save(options)? {
+            // 笔记已落到本地目录，直接把整篇打出来只会刷屏：
+            // 告知保存位置与查看命令即可。
             self.save(command, &generated)?;
+            eprintln!("{}", lang.note_ready_hint(command));
         } else {
+            // 没落盘就只能当场输出，否则刚生成的内容直接丢失。
             eprintln!("{}", lang.save_skipped());
+            self.deps.renderer.render(&generated, options.target)?;
         }
         Ok(QueryOutcome::AiGenerated)
     }
@@ -526,6 +541,47 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(temp.path().join("ls.md"), "# ls\n列出目录内容\n").expect("写笔记");
         temp
+    }
+
+    /// 两条提示必须落在同一行，只有建议列表换行。
+    #[test]
+    fn miss_message_puts_both_parts_on_the_same_line() {
+        let suggestions = vec!["ls".to_string(), "less".to_string()];
+        let message = miss_message("lz", &suggestions, Language::Zh);
+
+        let lines: Vec<&str> = message.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["未找到命令 `lz`，推荐:", "ls, less"],
+            "实际:
+{message}"
+        );
+        assert_eq!(
+            message.lines().next(),
+            miss_message("lz", &suggestions, Language::Zh)
+                .lines()
+                .next(),
+        );
+    }
+
+    #[test]
+    fn miss_message_without_suggestions_ends_the_sentence() {
+        let message = miss_message("zzzz", &[], Language::Zh);
+        assert_eq!(message, "未找到命令 `zzzz`。");
+        assert!(
+            !message.ends_with('，'),
+            "没有建议时不应留下悬空的逗号: {message}"
+        );
+    }
+
+    #[test]
+    fn miss_message_is_localized() {
+        let suggestions = vec!["ls".to_string()];
+        let message = miss_message("lz", &suggestions, Language::En);
+        assert_eq!(
+            message.lines().next(),
+            Some("No notes for `lz`, recommend:")
+        );
     }
 
     #[test]

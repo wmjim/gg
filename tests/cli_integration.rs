@@ -435,8 +435,9 @@ fn yes_flag_authorizes_non_interactive_generation() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("`foo`：测试用命令。"))
-        .stderr(predicate::str::contains("已保存笔记"));
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("已保存笔记"))
+        .stderr(predicate::str::contains("用 `gg foo` 查看"));
 
     assert!(marker.exists(), "--yes 应当授权调用 claude");
     assert!(notes_dir.join("foo.md").exists());
@@ -476,6 +477,31 @@ fn list_survives_unreadable_entry_and_warns() {
         .success()
         .stdout("ls\n")
         .stderr(predicate::str::contains("无法读取"));
+}
+
+/// 未落盘时没有任何「保存位置」可给，此时必须当场输出，否则内容直接丢失。
+#[test]
+fn unsaved_generated_note_is_still_printed() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+    write_config(
+        &temp,
+        "language = \"zh\"\nai_provider = \"claude\"\nask_before_ai = false\nauto_save_ai = false\n",
+    );
+
+    let fake_claude = create_fake_claude(&temp);
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_CLAUDE_BIN", fake_claude);
+    cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("`foo`：测试用命令。"))
+        .stderr(predicate::str::contains("已跳过保存"));
+
+    assert!(!notes_dir.join("foo.md").exists());
 }
 
 // ---------------------------------------------------------------- AI 后端选择
@@ -658,7 +684,7 @@ fn missing_note_without_claude_returns_suggestions() {
     cmd.assert()
         .failure()
         .code(3)
-        .stderr(predicate::str::contains("未找到命令 `lz` 的笔记"))
+        .stderr(predicate::str::contains("未找到命令 `lz`，推荐:\nls"))
         .stderr(predicate::str::contains("ls"))
         .stderr(predicate::str::contains("已跳过 AI 回退"));
 }
@@ -716,8 +742,10 @@ fn ai_opt_out_allows_non_interactive_generation() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("`foo`：测试用命令。"))
-        .stderr(predicate::str::contains("已保存笔记"));
+        // 笔记已落盘，不应再把整篇打到 stdout
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("已保存笔记"))
+        .stderr(predicate::str::contains("用 `gg foo` 查看"));
 
     assert!(marker.exists(), "显式选择后应当调用 claude");
     let saved = fs::read_to_string(notes_dir.join("foo.md")).expect("笔记应已保存");
