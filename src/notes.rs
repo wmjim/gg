@@ -111,6 +111,17 @@ pub fn ensure_note_file(notes_dir: &Path, command: &str) -> Result<EnsuredNote> 
     })
 }
 
+/// 删除笔记文件。返回 `false` 表示该命令本来就没有笔记。
+pub fn remove_note(notes_dir: &Path, command: &str) -> Result<bool> {
+    let path = note_path(notes_dir, command);
+    if !path.is_file() {
+        return Ok(false);
+    }
+
+    fs::remove_file(&path).with_context(|| format!("Failed to remove note: {}", path.display()))?;
+    Ok(true)
+}
+
 /// 列出笔记命令，同时返回无法读取而被跳过的条目。
 pub fn scan_commands(notes_dir: &Path) -> Result<Found<String>> {
     if !notes_dir.exists() {
@@ -333,6 +344,37 @@ mod tests {
 
         let none = search_notes_by_content(temp.path(), "不存在的词").expect("搜索正文");
         assert!(none.items.is_empty());
+    }
+
+    #[test]
+    fn remove_note_deletes_the_file_and_reports_absence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_note(temp.path(), "ls", "# ls\n").expect("写笔记");
+        write_note(temp.path(), "grep", "# grep\n").expect("写笔记");
+
+        assert!(
+            remove_note(temp.path(), "ls").expect("删除成功"),
+            "存在则应删除"
+        );
+        assert!(!temp.path().join("ls.md").exists());
+        assert!(temp.path().join("grep.md").exists(), "不应误删其它笔记");
+
+        assert!(
+            !remove_note(temp.path(), "ls").expect("再次删除不报错"),
+            "已不存在应返回 false"
+        );
+    }
+
+    #[test]
+    fn remove_note_does_not_follow_a_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("somedir.md")).expect("建同名目录");
+
+        assert!(
+            !remove_note(temp.path(), "somedir").expect("目录不当文件删"),
+            "同名目录不应被当作笔记删除"
+        );
+        assert!(temp.path().join("somedir.md").is_dir());
     }
 
     #[test]
