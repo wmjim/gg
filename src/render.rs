@@ -279,6 +279,62 @@ mod tests {
         assert!(html.contains("<table>"));
     }
 
+    /// 升级 pulldown-cmark 跨了两个大版本，而我们开了 6 个非默认选项。
+    /// 这里逐个盯住每项的实际产出，避免升级后某个选项静默失效。
+    #[test]
+    fn every_enabled_option_still_takes_effect() {
+        let markdown = "\
+# 标题 {#custom-id}\n\
+\n\
+~~删除~~\n\
+\n\
+- [ ] 待办\n\
+- [x] 完成\n\
+\n\
+引号 \"测试\" 与 -- 破折号\n\
+\n\
+脚注[^1]\n\
+\n\
+[^1]: 脚注内容\n\
+\n\
+| a | b |\n\
+|---|---|\n\
+| 1 | 2 |\n";
+
+        let html = render_html_for_test(markdown);
+
+        // ENABLE_HEADING_ATTRIBUTES
+        assert!(
+            html.contains(r#"<h1 id="custom-id">"#),
+            "标题属性失效:\n{html}"
+        );
+        // ENABLE_STRIKETHROUGH
+        assert!(html.contains("<del>删除</del>"), "删除线失效:\n{html}");
+        // ENABLE_TASKLISTS
+        assert!(html.contains(r#"type="checkbox""#), "任务列表失效:\n{html}");
+        assert!(html.contains("checked"), "勾选状态丢失:\n{html}");
+        // ENABLE_SMART_PUNCTUATION
+        assert!(
+            html.contains('“') && html.contains('”'),
+            "智能引号失效:\n{html}"
+        );
+        assert!(
+            html.contains('–') || html.contains('—'),
+            "破折号替换失效:\n{html}"
+        );
+        // ENABLE_FOOTNOTES
+        assert!(
+            html.contains(r#"class="footnote-reference""#),
+            "脚注引用失效:\n{html}"
+        );
+        assert!(
+            html.contains(r#"class="footnote-definition""#),
+            "脚注定义失效:\n{html}"
+        );
+        // ENABLE_TABLES
+        assert!(html.contains("<table>"), "表格失效:\n{html}");
+    }
+
     #[test]
     fn stale_render_files_are_pruned_but_other_files_are_kept() {
         let dir = tempfile::tempdir().expect("tempdir");
