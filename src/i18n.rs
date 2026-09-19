@@ -289,6 +289,30 @@ impl Language {
             zh: "无法读取笔记目录: {path}",
             en: "Failed to read notes directory: {path}",
         },
+        config_read_failed(path: &str) => {
+            zh: "无法读取配置文件: {path}",
+            en: "Failed to read the config file: {path}",
+        },
+        config_parse_failed(path: &str) => {
+            zh: "无法解析配置文件: {path}",
+            en: "Failed to parse the config file: {path}",
+        },
+        config_write_failed(path: &str) => {
+            zh: "无法写入配置文件: {path}",
+            en: "Failed to write the config file: {path}",
+        },
+        config_dir_create_failed(path: &str) => {
+            zh: "无法创建配置目录: {path}",
+            en: "Failed to create the config directory: {path}",
+        },
+        config_serialize_failed() => {
+            zh: "无法序列化配置",
+            en: "Failed to serialize the config",
+        },
+        config_dir_unknown() => {
+            zh: "无法确定系统配置目录",
+            en: "Cannot determine the system config directory",
+        },
         stdout_write_failed(err: &str) => {
             zh: "无法写入标准输出: {err}",
             en: "Failed to write to stdout: {err}",

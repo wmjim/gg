@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         Err(err) => err.exit(),
     };
 
-    match gg::run(cli) {
+    match gg::run(cli, lang) {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{}: {err:#}", lang.error_prefix());

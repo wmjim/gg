@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// AI 提供方。非法取值在配置反序列化阶段就报错，而不是等查询时才提示。
 ///
@@ -86,30 +86,25 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn load() -> Result<Self> {
-        let path = match config_path() {
+    pub fn load(lang: Language) -> Result<Self> {
+        let path = match config_path(lang) {
             Ok(path) => path,
+            // 拿不到配置目录时按「没有配置」处理：需要写入或定位笔记目录时
+            // 会由 save / resolve_notes_dir 报出真正的原因。
             Err(_) => return Ok(Self::default()),
         };
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("无法读取配置文件: {}", path.display()))?;
-        let config: Self = toml::from_str(&raw)
-            .with_context(|| format!("无法解析配置文件: {}", path.display()))?;
-        Ok(config)
+        load_from(&path, lang)
     }
 
-    pub fn save(&self) -> Result<()> {
-        let path = config_path()?;
+    pub fn save(&self, lang: Language) -> Result<()> {
+        let path = config_path(lang)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
-                .with_context(|| format!("无法创建配置目录: {}", parent.display()))?;
+                .with_context(|| lang.config_dir_create_failed(&parent.display().to_string()))?;
         }
-        let raw = toml::to_string_pretty(self).context("无法序列化配置")?;
-        fs::write(&path, raw).with_context(|| format!("无法写入配置文件: {}", path.display()))?;
+        let raw = toml::to_string_pretty(self).context(lang.config_serialize_failed())?;
+        fs::write(&path, raw)
+            .with_context(|| lang.config_write_failed(&path.display().to_string()))?;
         Ok(())
     }
 
@@ -165,44 +160,90 @@ impl AppConfig {
     }
 }
 
-/// 在 clap 解析之前探测界面语言，仅用于本地化 `--help` / `--version`。
+/// 从指定路径读取配置。
 ///
-/// 这里刻意吞掉所有错误：真正的配置错误会由 [`AppConfig::load`] 在
-/// `app::run` 中完整报出，此处只影响帮助文案的语种。
+/// 参数化路径是为了脱离进程环境测试文案与行为（`load` 自身依赖
+/// `GG_CONFIG_DIR` 等环境变量，不适合在并行测试里改）。
+fn load_from(path: &Path, lang: Language) -> Result<AppConfig> {
+    if !path.exists() {
+        return Ok(AppConfig::default());
+    }
+
+    let raw = fs::read_to_string(path)
+        .with_context(|| lang.config_read_failed(&path.display().to_string()))?;
+    let config: AppConfig = toml::from_str(&raw)
+        .with_context(|| lang.config_parse_failed(&path.display().to_string()))?;
+    Ok(config)
+}
+
+/// 在 clap 解析之前探测界面语言。
+///
+/// 用途有两处：本地化 `--help` / `--version`，以及本地化**配置自身**的报错
+/// —— 后者存在引导问题：语言写在配置里，配置解析失败时就读不到它。
+///
+/// 语种优先级：命令行 `--lang` > 配置文件里的 `language` > 默认（中文）。
+/// 配置文件用宽松解析单独取 `language`，所以即使配置里另有拼错的键（整份配置
+/// 会解析失败），报错仍然用得上用户设定的语言。
+///
+/// 这里刻意吞掉其余错误：真正的配置错误会由 [`AppConfig::load`] 在 `app::run`
+/// 中完整报出，此处只决定文案语种。
 pub fn peek_language() -> Language {
-    let mut args = env::args().skip(1);
+    if let Some(lang) = language_from_args(env::args().skip(1)) {
+        return lang;
+    }
+    language_from_config().unwrap_or_default()
+}
+
+/// 从命令行参数里找 `--lang <值>` / `--lang=<值>`。
+fn language_from_args(args: impl IntoIterator<Item = String>) -> Option<Language> {
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if let Some(value) = arg.strip_prefix("--lang=") {
             if let Some(lang) = Language::parse(value) {
-                return lang;
+                return Some(lang);
             }
         } else if arg == "--lang" {
             if let Some(value) = args.next() {
                 if let Some(lang) = Language::parse(&value) {
-                    return lang;
+                    return Some(lang);
                 }
             }
         }
     }
-
-    AppConfig::load()
-        .map(|config| config.language())
-        .unwrap_or_default()
+    None
 }
 
-pub fn config_path() -> Result<PathBuf> {
-    Ok(config_root_dir()?.join("gg").join("config.toml"))
+fn language_from_config() -> Option<Language> {
+    // 路径拿不到时只影响帮助文案的语种，用默认语言即可。
+    let path = config_path(Language::default()).ok()?;
+    language_from_config_at(&path)
 }
 
-pub fn default_notes_dir() -> Result<PathBuf> {
-    Ok(config_root_dir()?.join("gg").join("notes"))
+/// 宽松地只取配置里的 `language` 字段，忽略其它键与解析错误。
+fn language_from_config_at(path: &Path) -> Option<Language> {
+    #[derive(Deserialize)]
+    struct Peek {
+        language: Option<Language>,
+    }
+
+    let raw = fs::read_to_string(path).ok()?;
+    toml::from_str::<Peek>(&raw).ok()?.language
 }
 
-pub fn resolve_notes_dir(cli_override: Option<PathBuf>) -> Result<PathBuf> {
+pub fn config_path(lang: Language) -> Result<PathBuf> {
+    Ok(config_root_dir(lang)?.join("gg").join("config.toml"))
+}
+
+pub fn default_notes_dir(lang: Language) -> Result<PathBuf> {
+    Ok(config_root_dir(lang)?.join("gg").join("notes"))
+}
+
+pub fn resolve_notes_dir(cli_override: Option<PathBuf>, lang: Language) -> Result<PathBuf> {
     resolve_notes_dir_with(
         cli_override,
         env::var_os("GG_NOTES_DIR"),
         system_config_dir(),
+        lang,
     )
 }
 
@@ -210,6 +251,7 @@ pub(crate) fn resolve_notes_dir_with(
     cli_override: Option<PathBuf>,
     env_override: Option<OsString>,
     config_root: Option<PathBuf>,
+    lang: Language,
 ) -> Result<PathBuf> {
     if let Some(path) = cli_override {
         return Ok(path);
@@ -219,12 +261,12 @@ pub(crate) fn resolve_notes_dir_with(
         return Ok(PathBuf::from(path));
     }
 
-    let root = config_root.context("无法确定系统配置目录")?;
+    let root = config_root.context(lang.config_dir_unknown())?;
     Ok(root.join("gg").join("notes"))
 }
 
-fn config_root_dir() -> Result<PathBuf> {
-    system_config_dir().context("无法确定系统配置目录")
+fn config_root_dir(lang: Language) -> Result<PathBuf> {
+    system_config_dir().context(lang.config_dir_unknown())
 }
 
 /// 系统配置根目录，按以下优先级取值：
@@ -517,15 +559,65 @@ language = "zh"
         let env = OsString::from("env-notes");
         let cfg = PathBuf::from("cfg-root");
 
-        let path = resolve_notes_dir_with(Some(cli.clone()), Some(env.clone()), Some(cfg.clone()))
-            .expect("cli 覆盖");
+        let path = resolve_notes_dir_with(
+            Some(cli.clone()),
+            Some(env.clone()),
+            Some(cfg.clone()),
+            Language::Zh,
+        )
+        .expect("cli 覆盖");
         assert_eq!(path, cli);
 
-        let path =
-            resolve_notes_dir_with(None, Some(env.clone()), Some(cfg.clone())).expect("env 覆盖");
+        let path = resolve_notes_dir_with(None, Some(env.clone()), Some(cfg.clone()), Language::Zh)
+            .expect("env 覆盖");
         assert_eq!(path, PathBuf::from(env));
 
-        let path = resolve_notes_dir_with(None, None, Some(cfg.clone())).expect("默认目录");
+        let path =
+            resolve_notes_dir_with(None, None, Some(cfg.clone()), Language::Zh).expect("默认目录");
         assert_eq!(path, cfg.join("gg").join("notes"));
+    }
+
+    /// 配置解析失败时同样要用上用户设定的语言：`language` 单独宽松读取，
+    /// 不受其它键拼写错误的影响。
+    #[test]
+    fn language_is_read_leniently_even_when_the_config_is_otherwise_invalid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "language = \"en\"\nask_befor_ai = false\n").expect("写配置");
+
+        assert_eq!(language_from_config_at(&path), Some(Language::En));
+    }
+
+    #[test]
+    fn config_errors_are_localized() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "ai_provider = \"openai\"\n").expect("写配置");
+
+        let err = load_from(&path, Language::En).expect_err("非法配置必须报错");
+        assert!(
+            format!("{err:#}").contains("Failed to parse the config file"),
+            "{err:#}"
+        );
+
+        let err = load_from(&path, Language::Zh).expect_err("非法配置必须报错");
+        assert!(format!("{err:#}").contains("无法解析配置文件"), "{err:#}");
+    }
+
+    #[test]
+    fn command_line_language_beats_the_config_file() {
+        assert_eq!(
+            language_from_args(["--lang=en".to_string()]),
+            Some(Language::En)
+        );
+        assert_eq!(
+            language_from_args(["gg".to_string(), "--lang".to_string(), "zh".to_string()]),
+            Some(Language::Zh)
+        );
+        assert_eq!(
+            language_from_args(["gg".to_string(), "list".to_string()]),
+            None
+        );
+        assert_eq!(language_from_args(["--lang=jp".to_string()]), None);
     }
 }

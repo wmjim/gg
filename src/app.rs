@@ -44,35 +44,35 @@ const DEFAULT_TERMINAL_WIDTH: usize = 80;
 /// 覆盖两种情况：查询未命中笔记，以及操作因缺少用户确认而未执行。
 pub const EXIT_NOTE_NOT_FOUND: u8 = 3;
 
-pub fn run(cli: Cli) -> Result<ExitCode> {
+pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
     let parts = cli.into_parts();
-    let notes_dir = config::resolve_notes_dir(parts.notes_dir)?;
-    let mut config = AppConfig::load()?;
+    let notes_dir = config::resolve_notes_dir(parts.notes_dir, lang)?;
+    let mut config = AppConfig::load(lang)?;
 
     // --set-editor / --lang 是纯配置动作，先于首次运行引导处理。
     if let Some(editor) = parts.set_editor {
         config.editor = Some(editor);
-        config.save()?;
+        config.save(lang)?;
         eprintln!("{}", config.language().saved_editor_config());
         return Ok(ExitCode::SUCCESS);
     }
 
     if let Some(raw) = parts.lang {
-        let Some(lang) = Language::parse(&raw) else {
+        let Some(chosen) = Language::parse(&raw) else {
             anyhow::bail!("{}", config.language().invalid_language(&raw));
         };
-        config.language = Some(lang);
-        config.save()?;
-        eprintln!("{}", lang.saved_language_config());
+        config.language = Some(chosen);
+        config.save(chosen)?;
+        eprintln!("{}", chosen.saved_language_config());
         return Ok(ExitCode::SUCCESS);
     }
 
     let prompter = ConsolePrompter::new(config.language());
     if config.is_first_run() && prompter.is_interactive() {
-        let lang = ask_language(&prompter)?;
-        config.language = Some(lang);
-        config.save()?;
-        eprintln!("{}", lang.saved_language_config());
+        let chosen = ask_language(&prompter)?;
+        config.language = Some(chosen);
+        config.save(chosen)?;
+        eprintln!("{}", chosen.saved_language_config());
     }
 
     let lang = config.language();
@@ -110,7 +110,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             if config.is_first_run() {
                 // 非交互首次运行：默认中文并落盘，避免后续每次都判空。
                 config.language = Some(lang);
-                config.save().ok();
+                config.save(lang).ok();
                 eprintln!("{}", lang.first_run_default_note());
             }
 
@@ -146,7 +146,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         Action::None => {
             if config.is_first_run() {
                 config.language = Some(lang);
-                config.save().ok();
+                config.save(lang).ok();
                 eprintln!("{}", lang.first_run_default_note());
             }
             print_help(lang)?;
