@@ -21,6 +21,25 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  cross-check:
+    # 单独一个 job：这里的失败明确指向「某个平台分支编译不过」，
+    # 不会被 fmt/clippy 的失败混淆。项目里有大量平台门控代码
+    # （#[cfg(target_os)] 与 cfg(unix) / cfg(windows)）。
+    name: 其它平台分支的检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # check 不需要链接器，只需目标平台的 std
+          targets: x86_64-pc-windows-msvc, aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      # 背景：曾出现「只在 Windows/macOS 分支用到的 trait 导入，在 Linux 上
+      # 被判为未使用而删掉」的提交 —— Linux 编译通过、另外两个平台直接失败。
+      # 这里用 cargo check 提前拦住同类问题，不必等三平台矩阵。
+      - run: cargo check --all-targets --target x86_64-pc-windows-msvc
+      - run: cargo check --all-targets --target aarch64-apple-darwin
+
   test:
     # 项目包含三套平台分支（终端编辑器 / WSL 互操作 / Windows .cmd 转发），
     # 单平台跑绿不代表可用，必须矩阵覆盖。
