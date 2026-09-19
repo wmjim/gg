@@ -170,11 +170,25 @@ language = "zh"           # 可选：显示语言 (zh/en)
 
 当 `gg <cmd>` 未找到本地笔记时：
 
-1. 输出未命中提示和相近命令建议
+1. 在同一行输出未命中提示与相近命令建议
 2. 检查 AI 后端是否可用
 3. 在交互终端中（且 `ask_before_ai=true`）询问是否调用 AI
-4. 生成 Markdown 后输出到终端
-5. 根据保存策略保存到 `<notes_dir>/<cmd>.md`
+4. 落到 `<notes_dir>/<cmd>.md`，并告知保存位置与查看命令
+5. 若未落盘，则把生成结果直接输出到终端（否则内容就丢了）
+
+```text
+$ gg rsyns
+未找到命令 `rsyns`，推荐:
+rsync
+$ gg rsync
+正在生成 `rsync` 的笔记
+已保存笔记: ~/.config/gg/notes/rsync.md
+用 `gg rsync` 查看
+```
+
+**不再把生成的整篇笔记刷到终端** —— 笔记已在本地，直接用 `gg <cmd>` 查看或
+`gg --edit <cmd>` 修改即可。未落盘（`auto_save_ai=false` 且拒绝保存）时才
+当场输出，那种情况下没有「保存位置」可给，不输出就等于内容丢失。
 
 ### 后端选择
 
