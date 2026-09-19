@@ -1,291 +1,712 @@
-use crate::ai;
+//! 应用编排层：解析配置 → 分派动作 → 组装依赖。
+//!
+//! 查询逻辑收敛到 [`QueryService`]，通过 [`QueryDeps`] 注入渲染器、提示器、
+//! AI 生成器与编辑器，使「非交互场景不得触发 AI / 落盘」这类规则可被单测覆盖。
+
+use crate::ai::{ClaudeGenerator, NoteGenerator};
 use crate::cli::{Action, Cli};
 use crate::config::{self, AppConfig};
-use crate::editor;
+use crate::editor::{EditorLauncher, SystemEditor};
+use crate::i18n::Language;
 use crate::notes;
-use crate::render;
-use anyhow::Result;
-use clap::CommandFactory;
-use std::io::{self, IsTerminal, Write};
+use crate::prompt::{ConsolePrompter, Prompter};
+use crate::render::{MarkdownRenderer, OutputTarget, Renderer};
+use crate::utils::debug_log;
+use crate::utils::output;
+use anyhow::{Context, Result};
+use std::io;
 use std::path::Path;
+use std::process::ExitCode;
 
 const SUGGESTION_LIMIT: usize = 5;
 
-pub fn run(cli: Cli) -> Result<()> {
+/// 未命中笔记时的退出码，便于脚本判断（`gg foo || echo "没笔记"`）。
+pub const EXIT_NOTE_NOT_FOUND: u8 = 3;
+
+pub fn run(cli: Cli) -> Result<ExitCode> {
     let parts = cli.into_parts();
     let notes_dir = config::resolve_notes_dir(parts.notes_dir)?;
     let mut config = AppConfig::load()?;
 
-    // Handle --set-editor
+    // --set-editor / --lang 是纯配置动作，先于首次运行引导处理。
     if let Some(editor) = parts.set_editor {
         config.editor = Some(editor);
         config.save()?;
-        eprintln!("已保存编辑器配置。");
-        return Ok(());
+        eprintln!("{}", config.language().saved_editor_config());
+        return Ok(ExitCode::SUCCESS);
     }
 
-    // Handle --lang
-    if let Some(lang) = parts.lang {
-        let lang = lang.to_lowercase();
-        if lang != "zh" && lang != "en" {
-            anyhow::bail!("无效的语言选项: {}，请使用 zh 或 en", lang);
-        }
+    if let Some(raw) = parts.lang {
+        let Some(lang) = Language::parse(&raw) else {
+            anyhow::bail!("{}", config.language().invalid_language(&raw));
+        };
         config.language = Some(lang);
         config.save()?;
-        eprintln!("已保存语言配置。");
-        return Ok(());
+        eprintln!("{}", lang.saved_language_config());
+        return Ok(ExitCode::SUCCESS);
     }
 
-    // First run: ask for language preference (only in interactive mode)
-    if config.is_first_run() && is_interactive_terminal() {
-        eprintln!("首次使用 gg，请选择显示语言 (Choose display language):");
-        eprintln!("  1) 中文 (zh)");
-        eprintln!("  2) English (en)");
-        let lang = ask_choice(&["zh", "en"], "请输入选项数字 (Enter option number) [1]: ")?;
+    let prompter = ConsolePrompter::new(config.language());
+    if config.is_first_run() && prompter.is_interactive() {
+        let lang = ask_language(&prompter)?;
         config.language = Some(lang);
         config.save()?;
-        eprintln!("已保存语言配置。");
+        eprintln!("{}", lang.saved_language_config());
     }
 
-    // Determine current language (default to zh if not set)
-    let lang = config.language.as_deref().unwrap_or("zh");
+    let lang = config.language();
 
     match parts.action {
-        Action::List => list_commands(&notes_dir, lang),
-        Action::Search(keyword) => search_commands(&notes_dir, &keyword, lang),
-        Action::Query(command) => query_command(&notes_dir, &config, &command, parts.browser, parts.edit, lang),
-        Action::None => {
-            // No subcommand and no config action - this is first run without interaction
-            // or user just wants help. Show help.
-            let is_first = config.is_first_run();
-            if is_first {
-                // First run but non-interactive: default to zh
-                config.language = Some("zh".to_string());
+        Action::List => {
+            let commands = notes::list_commands(&notes_dir)?;
+            output::write_lines(io::stdout().lock(), commands)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Action::Search(keyword) => {
+            let commands = notes::search_commands_by_name(&notes_dir, &keyword)?;
+            output::write_lines(io::stdout().lock(), commands)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Action::Query(command) => {
+            if config.is_first_run() {
+                // 非交互首次运行：默认中文并落盘，避免后续每次都判空。
+                config.language = Some(lang);
                 config.save().ok();
-                eprintln!("(已默认设置语言为中文，如需更改请使用 --lang 选项)");
+                eprintln!("{}", lang.first_run_default_note());
             }
 
-            // Determine lang after potential first-run save
-            let current_lang = config.language.as_deref().unwrap_or("zh");
+            let renderer = MarkdownRenderer::new(lang);
+            let editor = SystemEditor::from_config(&config);
+            let generator = ClaudeGenerator::new(lang);
+            let deps = QueryDeps {
+                renderer: &renderer,
+                editor: &editor,
+                generator: &generator,
+                prompter: &prompter,
+            };
+            let service = QueryService::new(&notes_dir, &config, &deps);
+            let options = QueryOptions {
+                target: if parts.browser {
+                    OutputTarget::Browser
+                } else {
+                    OutputTarget::Terminal
+                },
+                edit: parts.edit,
+            };
 
-            if current_lang == "zh" {
-                print_help_zh();
-            } else {
-                Cli::command().print_help().map_err(|e| anyhow::anyhow!("Failed to print help: {}", e))?;
-                println!();
+            Ok(service
+                .query(&command, options)?
+                .exit_code()
+                .map_or(ExitCode::SUCCESS, ExitCode::from))
+        }
+        Action::None => {
+            if config.is_first_run() {
+                config.language = Some(lang);
+                config.save().ok();
+                eprintln!("{}", lang.first_run_default_note());
             }
+            print_help(lang)?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// clap 的 `print_help` 同样会在下游关闭管道时报错，这里一并吸收。
+fn print_help(lang: Language) -> Result<()> {
+    if let Err(err) = crate::cli::command(lang).print_help() {
+        if !crate::utils::output::is_broken_pipe(&err) {
+            return Err(err).context("无法输出帮助信息");
+        }
+    }
+    Ok(())
+}
+
+fn ask_language(prompter: &dyn Prompter) -> Result<Language> {
+    let bootstrap = Language::default();
+    eprintln!("{}", bootstrap.first_run_header());
+    eprintln!("{}", bootstrap.first_run_option_zh());
+    eprintln!("{}", bootstrap.first_run_option_en());
+
+    let chosen = prompter.choose(
+        &bootstrap.first_run_prompt(),
+        &["zh", "en"],
+        &bootstrap.invalid_input(),
+    )?;
+
+    Language::parse(&chosen).ok_or_else(|| anyhow::anyhow!("无法识别语言选项: {chosen}"))
+}
+
+/// 查询动作的最终状态，决定退出码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryOutcome {
+    /// 命中本地笔记并已渲染。
+    Rendered,
+    /// `--edit` 已在编辑器中打开。
+    EditorOpened,
+    /// 检测到 claude 但生成成功。
+    AiGenerated,
+    /// 用户拒绝调用 AI。
+    AiDeclined,
+    /// 非交互终端，按策略跳过 AI。
+    AiSkippedNonInteractive,
+    /// claude 不可用。
+    AiUnavailable,
+}
+
+impl QueryOutcome {
+    /// 没有可用的本地笔记内容时返回非 0 退出码，便于脚本判断
+    /// （`gg foo || echo "没笔记"`）。
+    fn exit_code(self) -> Option<u8> {
+        match self {
+            QueryOutcome::AiDeclined
+            | QueryOutcome::AiSkippedNonInteractive
+            | QueryOutcome::AiUnavailable => Some(EXIT_NOTE_NOT_FOUND),
+            QueryOutcome::Rendered | QueryOutcome::EditorOpened | QueryOutcome::AiGenerated => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QueryOptions {
+    pub target: OutputTarget,
+    pub edit: bool,
+}
+
+pub struct QueryDeps<'a> {
+    pub renderer: &'a dyn Renderer,
+    pub editor: &'a dyn EditorLauncher,
+    pub generator: &'a dyn NoteGenerator,
+    pub prompter: &'a dyn Prompter,
+}
+
+pub struct QueryService<'a> {
+    notes_dir: &'a Path,
+    config: &'a AppConfig,
+    deps: &'a QueryDeps<'a>,
+}
+
+impl<'a> QueryService<'a> {
+    pub fn new(notes_dir: &'a Path, config: &'a AppConfig, deps: &'a QueryDeps<'a>) -> Self {
+        Self {
+            notes_dir,
+            config,
+            deps,
+        }
+    }
+
+    pub fn query(&self, command: &str, options: QueryOptions) -> Result<QueryOutcome> {
+        notes::validate_command_name(command)?;
+        let lang = self.config.language();
+
+        if options.edit {
+            let path = notes::ensure_note_file(self.notes_dir, command)?;
+            self.deps.editor.open(&path)?;
+            return Ok(QueryOutcome::EditorOpened);
+        }
+
+        if let Some(markdown) = notes::read_note(self.notes_dir, command)? {
+            self.deps.renderer.render(&markdown, options.target)?;
+            return Ok(QueryOutcome::Rendered);
+        }
+
+        self.report_miss(command, lang)?;
+        self.ai_fallback(command, options)
+    }
+
+    fn report_miss(&self, command: &str, lang: Language) -> Result<()> {
+        eprintln!("{}", lang.note_not_found(command));
+
+        let all_commands = notes::list_commands(self.notes_dir)?;
+        let suggestions = notes::suggest_commands(command, &all_commands, SUGGESTION_LIMIT);
+        if !suggestions.is_empty() {
+            eprintln!("{}", lang.did_you_mean(&suggestions.join(", ")));
+        }
+        Ok(())
+    }
+
+    fn ai_fallback(&self, command: &str, options: QueryOptions) -> Result<QueryOutcome> {
+        let lang = self.config.language();
+
+        if !self.deps.generator.is_available() {
+            eprintln!("{}", lang.claude_missing());
+            return Ok(QueryOutcome::AiUnavailable);
+        }
+
+        // 关键策略：`ask_before_ai = true`（默认）表示需要用户确认，而确认必须
+        // 依赖交互终端。`gg foo | less`、`gg foo > out.md` 这类场景 stdout 不是
+        // 终端，若直接放行会在用户毫不知情的情况下调用 AI 并写入笔记目录。
+        // 把 `ask_before_ai` 设为 false 即视为用户显式放弃确认，允许非交互生成。
+        if self.config.ask_before_ai {
+            if !self.deps.prompter.is_interactive() {
+                eprintln!("{}", lang.ai_skipped_non_interactive());
+                return Ok(QueryOutcome::AiSkippedNonInteractive);
+            }
+            if !self
+                .deps
+                .prompter
+                .confirm(&lang.ask_generate_note(), true)?
+            {
+                eprintln!("{}", lang.ai_cancelled());
+                return Ok(QueryOutcome::AiDeclined);
+            }
+        }
+
+        debug_log!("app::ai_fallback: 为 `{command}` 生成笔记");
+        let generated = self
+            .deps
+            .generator
+            .generate(command, &self.config.ai_note_language)?;
+        self.deps.renderer.render(&generated, options.target)?;
+        self.maybe_save(command, &generated)?;
+        Ok(QueryOutcome::AiGenerated)
+    }
+
+    fn maybe_save(&self, command: &str, generated: &str) -> Result<()> {
+        let lang = self.config.language();
+
+        let should_save = if self.config.ask_before_save {
+            self.deps
+                .prompter
+                .confirm(&lang.ask_save_note(), self.config.auto_save_ai)?
+        } else {
+            self.config.auto_save_ai
+        };
+
+        if !should_save {
+            eprintln!("{}", lang.save_skipped());
+            return Ok(());
+        }
+
+        let path = notes::write_note(self.notes_dir, command, generated)?;
+        eprintln!("{}", lang.note_saved(&path.display().to_string()));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+    use anyhow::Result;
+    use std::cell::RefCell;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Default)]
+    struct FakeRenderer {
+        rendered: RefCell<Vec<String>>,
+    }
+
+    impl Renderer for FakeRenderer {
+        fn render(&self, markdown: &str, _target: OutputTarget) -> Result<()> {
+            self.rendered.borrow_mut().push(markdown.to_string());
             Ok(())
         }
     }
-}
 
-fn ask_choice(options: &[&str], prompt: &str) -> Result<String> {
-    let mut stderr = io::stderr();
-    loop {
-        write!(stderr, "{}", prompt)?;
-        stderr.flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let answer = input.trim();
+    #[derive(Default)]
+    struct FakeEditor {
+        opened: RefCell<Vec<PathBuf>>,
+    }
 
-        if answer.is_empty() {
-            return Ok(options[0].to_string());
+    impl EditorLauncher for FakeEditor {
+        fn open(&self, path: &Path) -> Result<()> {
+            self.opened.borrow_mut().push(path.to_path_buf());
+            Ok(())
         }
+    }
 
-        if let Ok(num) = answer.parse::<usize>() {
-            if num >= 1 && num <= options.len() {
-                return Ok(options[num - 1].to_string());
+    struct FakeGenerator {
+        available: bool,
+        calls: RefCell<usize>,
+    }
+
+    impl FakeGenerator {
+        fn available() -> Self {
+            Self {
+                available: true,
+                calls: RefCell::new(0),
             }
         }
 
-        // Check if input directly matches an option
-        for opt in options {
-            if answer.eq_ignore_ascii_case(opt) {
-                return Ok(opt.to_string());
+        fn missing() -> Self {
+            Self {
+                available: false,
+                calls: RefCell::new(0),
             }
         }
 
-        writeln!(stderr, "无效输入，请重新输入。")?;
-    }
-}
-
-fn list_commands(notes_dir: &Path, _lang: &str) -> Result<()> {
-    let commands = notes::list_commands(notes_dir)?;
-    for command in commands {
-        println!("{command}");
-    }
-    Ok(())
-}
-
-fn search_commands(notes_dir: &Path, keyword: &str, _lang: &str) -> Result<()> {
-    let commands = notes::search_commands_by_name(notes_dir, keyword)?;
-    for command in commands {
-        println!("{command}");
-    }
-    Ok(())
-}
-
-fn query_command(notes_dir: &Path, config: &AppConfig, command: &str, browser: bool, edit: bool, lang: &str) -> Result<()> {
-    notes::validate_command_name(command)?;
-
-    if edit {
-        let path = notes::ensure_note_file(notes_dir, command)?;
-        editor::open_in_editor(&path, config)?;
-        return Ok(());
-    }
-    if let Some(markdown) = notes::read_note(notes_dir, command)? {
-        if browser {
-            render::render_markdown_in_browser(&markdown)?;
-        } else {
-            render::render_markdown(&markdown);
+        fn call_count(&self) -> usize {
+            *self.calls.borrow()
         }
-        return Ok(());
     }
 
-    let msg_not_found = if lang == "zh" {
-        format!("未找到命令 `{command}` 的笔记。")
-    } else {
-        format!("No notes found for command `{command}`.")
-    };
-    eprintln!("{msg_not_found}");
-
-    let all_commands = notes::list_commands(notes_dir)?;
-    let suggestions = notes::suggest_commands(command, &all_commands, SUGGESTION_LIMIT);
-    if !suggestions.is_empty() {
-        let msg = if lang == "zh" {
-            format!("你可能想查: {}", suggestions.join(", "))
-        } else {
-            format!("Did you mean: {}", suggestions.join(", "))
-        };
-        eprintln!("{msg}");
-    }
-
-    if !config.ai_provider.eq_ignore_ascii_case("claude") {
-        let msg = if lang == "zh" {
-            format!("当前 ai_provider={}，v1 仅支持 claude，已跳过 AI 回退。", config.ai_provider)
-        } else {
-            format!("ai_provider={} not supported in v1, skipped AI fallback.", config.ai_provider)
-        };
-        eprintln!("{msg}");
-        return Ok(());
-    }
-
-    if !ai::is_claude_available() {
-        let msg = if lang == "zh" {
-            "未检测到 claude CLI，已跳过 AI 回退。"
-        } else {
-            "claude CLI not found, skipped AI fallback."
-        };
-        eprintln!("{msg}");
-        return Ok(());
-    }
-
-    let interactive = is_interactive_terminal();
-    let (question, default_yes) = if lang == "zh" {
-        ("检测到 claude，可尝试生成该笔记。是否继续查询？", true)
-    } else {
-        ("claude detected. Generate notes? ", true)
-    };
-    let should_query = if interactive && config.ask_before_ai {
-        ask_yes_no(question, default_yes)?
-    } else {
-        true
-    };
-
-    if !should_query {
-        let msg = if lang == "zh" { "已取消 AI 查询。" } else { "AI query cancelled." };
-        eprintln!("{msg}");
-        return Ok(());
-    }
-
-    let generated = ai::generate_note_with_claude(command, &config.ai_note_language)?;
-    if browser {
-        render::render_markdown_in_browser(&generated)?;
-    } else {
-        render::render_markdown(&generated);
-    }
-
-    let (save_question, default_save) = if lang == "zh" {
-        ("是否保存这份 AI 生成笔记到本地？", config.auto_save_ai)
-    } else {
-        ("Save AI-generated notes locally?", config.auto_save_ai)
-    };
-    let should_save = if interactive && config.ask_before_save {
-        ask_yes_no(save_question, default_save)?
-    } else {
-        config.auto_save_ai
-    };
-
-    if should_save {
-        let path = notes::write_note(notes_dir, command, &generated)?;
-        let msg = if lang == "zh" {
-            format!("已保存笔记: {}", path.display())
-        } else {
-            format!("Notes saved: {}", path.display())
-        };
-        eprintln!("{msg}");
-    } else {
-        let msg = if lang == "zh" { "已跳过保存。" } else { "Save skipped." };
-        eprintln!("{msg}");
-    }
-
-    Ok(())
-}
-
-fn is_interactive_terminal() -> bool {
-    io::stdin().is_terminal() && io::stdout().is_terminal()
-}
-
-fn ask_yes_no(question: &str, default_yes: bool) -> Result<bool> {
-    let mut stderr = io::stderr();
-    let default_hint = if default_yes { "Y/n" } else { "y/N" };
-
-    loop {
-        write!(stderr, "{question} [{default_hint}]: ")?;
-        stderr.flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let answer = input.trim().to_ascii_lowercase();
-
-        if answer.is_empty() {
-            return Ok(default_yes);
-        }
-        if answer == "y" || answer == "yes" {
-            return Ok(true);
-        }
-        if answer == "n" || answer == "no" {
-            return Ok(false);
+    impl NoteGenerator for FakeGenerator {
+        fn is_available(&self) -> bool {
+            self.available
         }
 
-        writeln!(stderr, "请输入 y 或 n。")?;
+        fn generate(&self, command: &str, _language: &str) -> Result<String> {
+            *self.calls.borrow_mut() += 1;
+            Ok(format!("# {command}\nAI 生成内容\n"))
+        }
+    }
+
+    struct FakePrompter {
+        interactive: bool,
+        answers: RefCell<Vec<bool>>,
+        asked: RefCell<Vec<String>>,
+    }
+
+    impl FakePrompter {
+        fn interactive(answers: Vec<bool>) -> Self {
+            Self {
+                interactive: true,
+                answers: RefCell::new(answers),
+                asked: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn non_interactive() -> Self {
+            Self {
+                interactive: false,
+                answers: RefCell::new(Vec::new()),
+                asked: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.borrow().clone()
+        }
+    }
+
+    impl Prompter for FakePrompter {
+        fn is_interactive(&self) -> bool {
+            self.interactive
+        }
+
+        fn confirm(&self, question: &str, _default_yes: bool) -> Result<bool> {
+            self.asked.borrow_mut().push(question.to_string());
+            let mut answers = self.answers.borrow_mut();
+            if answers.is_empty() {
+                anyhow::bail!("测试用例没有准备足够的回答");
+            }
+            Ok(answers.remove(0))
+        }
+
+        fn choose(&self, _prompt: &str, options: &[&str], _retry: &str) -> Result<String> {
+            Ok(options[0].to_string())
+        }
+    }
+
+    fn options() -> QueryOptions {
+        QueryOptions {
+            target: OutputTarget::Terminal,
+            edit: false,
+        }
+    }
+
+    fn notes_dir_with_ls() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("ls.md"), "# ls\n列出目录内容\n").expect("写笔记");
+        temp
+    }
+
+    #[test]
+    fn hit_renders_without_touching_ai() {
+        let temp = notes_dir_with_ls();
+        let config = AppConfig::default();
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("ls", options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::Rendered);
+        assert_eq!(renderer.rendered.borrow().len(), 1);
+        assert_eq!(generator.call_count(), 0);
+        assert!(prompter.asked().is_empty());
+    }
+
+    /// P0 回归：管道场景（stdout 非终端）绝不能调用 AI，也不能落盘。
+    #[test]
+    fn non_interactive_miss_never_calls_ai_nor_writes_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            auto_save_ai: true,
+            ask_before_ai: true,
+            ..AppConfig::default()
+        };
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiSkippedNonInteractive);
+        assert_eq!(generator.call_count(), 0, "非交互时不得调用 AI");
+        assert!(!temp.path().join("lz.md").exists(), "非交互时不得写入笔记");
+    }
+
+    #[test]
+    fn declining_ai_confirmation_skips_generation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            ask_before_ai: true,
+            ..AppConfig::default()
+        };
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::interactive(vec![false]);
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiDeclined);
+        assert_eq!(generator.call_count(), 0);
+        assert!(!temp.path().join("lz.md").exists());
+    }
+
+    /// 显式把 `ask_before_ai` 设为 false 即视为放弃确认，允许非交互生成。
+    #[test]
+    fn ask_before_ai_false_allows_non_interactive_generation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            ask_before_ai: false,
+            auto_save_ai: true,
+            ask_before_save: false,
+            ..AppConfig::default()
+        };
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiGenerated);
+        assert_eq!(generator.call_count(), 1);
+        assert!(temp.path().join("lz.md").exists());
+    }
+
+    #[test]
+    fn interactive_accept_saves_generated_note() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            ask_before_ai: true,
+            auto_save_ai: true,
+            ask_before_save: false,
+            ..AppConfig::default()
+        };
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::interactive(vec![true]);
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiGenerated);
+        assert_eq!(generator.call_count(), 1);
+        let saved = fs::read_to_string(temp.path().join("lz.md")).expect("笔记应已保存");
+        assert!(saved.contains("AI 生成内容"));
+    }
+
+    #[test]
+    fn ask_before_save_can_veto_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            ask_before_ai: true,
+            ask_before_save: true,
+            auto_save_ai: false,
+            ..AppConfig::default()
+        };
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::interactive(vec![true, false]);
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiGenerated);
+        assert_eq!(generator.call_count(), 1);
+        assert!(!temp.path().join("lz.md").exists(), "用户拒绝了保存");
+    }
+
+    #[test]
+    fn missing_claude_reports_unavailable_without_prompting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig::default();
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::missing();
+        let prompter = FakePrompter::interactive(vec![true]);
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiUnavailable);
+        assert!(prompter.asked().is_empty(), "claude 缺失时不应询问");
+    }
+
+    #[test]
+    fn edit_creates_note_and_opens_editor_without_rendering() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig::default();
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::missing();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query(
+                "newcmd",
+                QueryOptions {
+                    target: OutputTarget::Terminal,
+                    edit: true,
+                },
+            )
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::EditorOpened);
+        assert_eq!(editor.opened.borrow().len(), 1);
+        assert!(temp.path().join("newcmd.md").exists());
+        assert!(renderer.rendered.borrow().is_empty());
+    }
+
+    #[test]
+    fn path_traversal_is_rejected_before_touching_disk() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig::default();
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::missing();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let err = QueryService::new(temp.path(), &config, &deps)
+            .query("../etc/passwd", options())
+            .expect_err("路径穿越必须被拒绝");
+        assert!(format!("{err:#}").contains("unsupported path characters"));
+    }
+
+    #[test]
+    fn miss_sets_not_found_exit_code() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig::default();
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::missing();
+        let prompter = FakePrompter::non_interactive();
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", options())
+            .expect("查询成功");
+
+        assert_eq!(outcome, QueryOutcome::AiUnavailable);
+        assert_eq!(
+            outcome.exit_code(),
+            Some(EXIT_NOTE_NOT_FOUND),
+            "未命中必须返回非 0 退出码"
+        );
+    }
+
+    /// 生成成功即视为成功：用户已经拿到内容。
+    #[test]
+    fn generated_note_exits_zero() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = AppConfig {
+            ask_before_ai: true,
+            ..AppConfig::default()
+        };
+        let renderer = FakeRenderer::default();
+        let editor = FakeEditor::default();
+        let generator = FakeGenerator::available();
+        let prompter = FakePrompter::interactive(vec![true]);
+        let deps = QueryDeps {
+            renderer: &renderer,
+            editor: &editor,
+            generator: &generator,
+            prompter: &prompter,
+        };
+
+        let outcome = QueryService::new(temp.path(), &config, &deps)
+            .query("lz", options())
+            .expect("查询成功");
+
+        assert_eq!(outcome.exit_code(), None);
     }
 }
-
-fn print_help_zh() {
-    println!("gg - 像 man 一样查询你自己的命令笔记");
-    println!();
-    println!("用法: gg [选项] [命令]");
-    println!();
-    println!("命令:");
-    println!("  list              列出所有笔记命令");
-    println!("  search <关键词>   按文件名搜索笔记命令");
-    println!("  help              打印此帮助信息或指定子命令的帮助");
-    println!();
-    println!("选项:");
-    println!("    --notes-dir <目录>      指定笔记目录");
-    println!("  -b, --browser             在浏览器中打开 markdown 而非终端");
-    println!("  -e, --edit                在默认编辑器中打开 markdown 进行编辑");
-    println!("    --set-editor <编辑器>   设置默认编辑器并保存到配置");
-    println!("    --lang <语言>           设置显示语言 (zh/en) 并保存到配置");
-    println!("  --help                    打印帮助");
-    println!("  --version                 打印版本");
-}
-
-
-
-
-
-
-
-

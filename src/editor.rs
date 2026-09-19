@@ -1,189 +1,201 @@
-use crate::config::AppConfig;
+//! 打开编辑器。回退顺序：配置指定 > 环境变量 > 终端编辑器 > 系统默认。
+
+use crate::i18n::Language;
+use crate::utils::debug_log;
+use crate::utils::platform::{self, OpenTarget};
+use crate::utils::process::resolve_program;
+use anyhow::{Context, Result};
 use std::env;
-use std::io;
 use std::path::Path;
 use std::process::Command;
 
-pub fn open_in_editor(path: &Path, config: &AppConfig) -> io::Result<()> {
-    // Use configured editor if available (takes precedence over env vars)
-    if let Some(ref editor) = config.editor {
-        if !editor.trim().is_empty() {
-            // Verify the editor exists before trying to use it
-            if editor_exists(editor) {
-                return run_editor_command(editor, path);
+/// 编辑器端口，便于测试时替换为假实现。
+pub trait EditorLauncher {
+    fn open(&self, path: &Path) -> Result<()>;
+}
+
+pub struct SystemEditor {
+    /// `config.editor`，优先级最高。
+    configured: Option<String>,
+    lang: Language,
+}
+
+impl SystemEditor {
+    pub fn new(configured: Option<String>, lang: Language) -> Self {
+        Self { configured, lang }
+    }
+
+    pub fn from_config(config: &crate::config::AppConfig) -> Self {
+        Self::new(config.editor_spec().map(str::to_string), config.language())
+    }
+}
+
+impl EditorLauncher for SystemEditor {
+    fn open(&self, path: &Path) -> Result<()> {
+        if let Some(spec) = self.configured.as_deref() {
+            match launch(spec, path) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    eprintln!("{}", self.lang.configured_editor_missing(spec));
+                    debug_log!("editor::open: 配置编辑器 `{spec}` 失败: {err:#}");
+                }
             }
-            // Editor doesn't exist, warn and skip env vars since they might also be problematic
-            eprintln!("Warning: configured editor '{}' not found, trying default editors...", editor);
-            return open_with_default_editor(path);
+        } else if let Some(spec) = env_editor_spec() {
+            match launch(&spec, path) {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    eprintln!("{}", self.lang.env_editor_missing(&spec));
+                    debug_log!("editor::open: 环境变量编辑器 `{spec}` 失败: {err:#}");
+                }
+            }
+        }
+
+        open_with_system_default(path, self.lang)
+    }
+}
+
+/// 启动指定编辑器并等待其退出（编辑场景必须阻塞到用户保存完成）。
+fn launch(spec: &str, path: &Path) -> Result<()> {
+    let program = resolve_program(spec)?;
+    debug_log!(
+        "editor::launch: 启动 `{}`, args={:?}, path={}",
+        program.bin.display(),
+        program.args,
+        path.display()
+    );
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows 上的 code.cmd / code.bat 无法被 CreateProcess 直接执行，
+        // 必须经由 cmd.exe 转发。
+        if needs_shell_forwarding(&program.bin) {
+            let status = Command::new("cmd")
+                .arg("/C")
+                .arg(&program.bin)
+                .args(&program.args)
+                .arg(path)
+                .status()
+                .with_context(|| format!("无法启动 `{}`", program.describe()))?;
+            anyhow::ensure!(status.success(), "编辑器退出码 {status}");
+            return Ok(());
         }
     }
 
-    // Fall back to environment variables only if no configured editor
-    if let Some(editor) = editor_command() {
-        if editor_exists(&editor) {
-            return run_editor_command(&editor, path);
-        }
-        eprintln!("Warning: {} not found, trying default editors...", editor);
-    }
-
-    open_with_default_editor(path)
+    let status = Command::new(&program.bin)
+        .args(&program.args)
+        .arg(path)
+        .status()
+        .with_context(|| format!("无法启动 `{}`", program.describe()))?;
+    anyhow::ensure!(status.success(), "编辑器退出码 {status}");
+    Ok(())
 }
 
-fn editor_exists(editor: &str) -> bool {
-    // Check if the first word of the editor command exists
-    // This handles cases like "nvim --foo" where we just need to check "nvim"
-    let cmd = editor.split_whitespace().next().unwrap_or(editor);
-    which::which(cmd).is_ok()
+#[cfg(target_os = "windows")]
+fn needs_shell_forwarding(bin: &Path) -> bool {
+    bin.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "cmd" | "bat"))
+        .unwrap_or(false)
 }
 
-fn editor_command() -> Option<String> {
-    env::var("GG_EDITOR")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| env::var("VISUAL").ok().filter(|value| !value.trim().is_empty()))
-        .or_else(|| env::var("EDITOR").ok().filter(|value| !value.trim().is_empty()))
+fn env_editor_spec() -> Option<String> {
+    ["GG_EDITOR", "VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|key| env::var(key).ok().filter(|value| !value.trim().is_empty()))
 }
 
-fn run_editor_command(command: &str, path: &Path) -> io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        let cmd = format!("{} \"{}\"", command, path.to_string_lossy());
-        Command::new("cmd").args(["/C", &cmd]).spawn()?;
-        return Ok(());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Run the editor and wait for it to complete
-        Command::new(command).arg(path).status()?;
-        return Ok(());
-    }
-}
-
-fn open_with_default_editor(path: &Path) -> io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("notepad.exe").arg(path).spawn()?;
-        return Ok(());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open").args(["-e", &path.to_string_lossy()]).spawn()?;
-        return Ok(());
-    }
-
+fn open_with_system_default(path: &Path, lang: Language) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // Prefer terminal editors when available
-        let cli_editors = ["nvim", "vim", "vi", "hx", "helix", "nano"];
-        for editor in cli_editors {
-            if editor_exists(editor) {
-                if Command::new(editor).arg(path).status().map(|s| s.success()).unwrap_or(false) {
+        // 终端编辑器优先，避免在 WSL / 无桌面环境下误开 GUI 程序。
+        for editor in ["nvim", "vim", "vi", "hx", "helix", "nano"] {
+            if which::which(editor).is_err() {
+                continue;
+            }
+            match Command::new(editor).arg(path).status() {
+                Ok(status) if status.success() => {
+                    debug_log!("editor::open_with_system_default: 已用 `{editor}` 打开");
                     return Ok(());
+                }
+                Ok(status) => {
+                    debug_log!("editor::open_with_system_default: `{editor}` 退出码 {status}");
+                }
+                Err(err) => {
+                    debug_log!("editor::open_with_system_default: `{editor}` 启动失败: {err}");
                 }
             }
         }
-
-        // Check if running in WSL
-        let is_wsl = std::env::var("WSL_DISTRO_NAME").is_ok()
-            || std::fs::read_to_string("/proc/version")
-                .map(|v| v.to_lowercase().contains("microsoft"))
-                .unwrap_or(false);
-
-        if is_wsl {
-            // Convert path to Windows format first
-            let windows_path = Command::new("wslpath")
-                .arg("-w")
-                .arg(path)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| path.to_string_lossy().to_string());
-
-            // Try wslview first if available (wslu)
-            if let Ok(status) = Command::new("wslview").arg(&windows_path).status() {
-                if status.success() {
-                    return Ok(());
-                }
-            }
-
-            // Prefer Windows PowerShell Start-Process
-            if let Ok(status) = Command::new("powershell.exe")
-                .args(["-NoProfile", "-Command", "Start-Process", &windows_path])
-                .status()
-            {
-                if status.success() {
-                    return Ok(());
-                }
-            }
-
-            // PowerShell 7 fallback
-            if let Ok(status) = Command::new("pwsh.exe")
-                .args(["-NoProfile", "-Command", "Start-Process", &windows_path])
-                .status()
-            {
-                if status.success() {
-                    return Ok(());
-                }
-            }
-
-            // cmd.exe fallback
-            if let Ok(status) = Command::new("cmd.exe")
-                .args(["/C", "start", "", &windows_path])
-                .status()
-            {
-                if status.success() {
-                    return Ok(());
-                }
-            }
-
-            // Absolute Windows paths if PATH interop is missing
-            let powershell_path = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
-            if let Ok(status) = Command::new(powershell_path)
-                .args(["-NoProfile", "-Command", "Start-Process", &windows_path])
-                .status()
-            {
-                if status.success() {
-                    return Ok(());
-                }
-            }
-
-            let cmd_path = "/mnt/c/Windows/System32/cmd.exe";
-            if let Ok(status) = Command::new(cmd_path)
-                .args(["/C", "start", "", &windows_path])
-                .status()
-            {
-                if status.success() {
-                    return Ok(());
-                }
-            }
-
-            let explorer_path = "/mnt/c/Windows/explorer.exe";
-            if let Ok(status) = Command::new(explorer_path)
-                .arg(&windows_path)
-                .status()
-            {
-                if status.success() {
-                    return Ok(());
-                }
-            }
-        }
-
-        let candidates = ["xdg-open", "gio", "gnome-open", "kde-open"];
-        for candidate in candidates {
-            if Command::new(candidate).arg(path).spawn().is_ok() {
-                return Ok(());
-            }
-        }
-        return Err(io::Error::other(
-            "未找到可用的编辑器。请设置 GG_EDITOR/EDITOR/VISUAL，或安装 vim/nvim/helix，或在 WSL 中安装 wslu (wslview)。",
-        ));
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    {
-        return Err(io::Error::other("不支持的操作系统"));
-    }
+    platform::open_path(path, OpenTarget::Editor, lang).with_context(|| lang.no_editor_found())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
 
+    fn fake_editor(temp: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let path = temp.join(name);
+            fs::write(&path, body).expect("写假编辑器");
+            let mut perm = fs::metadata(&path).expect("stat").permissions();
+            perm.set_mode(0o755);
+            fs::set_permissions(&path, perm).expect("chmod");
+            path
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (temp, name, body);
+            unimplemented!("仅用于 unix 测试")
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_editor_receives_path_as_argument() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let record = temp.path().join("argv.txt");
+        let editor = fake_editor(
+            temp.path(),
+            "recorder",
+            &format!("#!/bin/sh\nprintf '%s' \"$1\" > {}\n", record.display()),
+        );
+        let note = temp.path().join("ls.md");
+        fs::write(&note, "# ls\n").expect("写笔记");
+
+        let launcher = SystemEditor::new(Some(editor.display().to_string()), Language::Zh);
+        launcher.open(&note).expect("打开笔记");
+
+        let recorded = fs::read_to_string(&record).expect("读取记录");
+        assert_eq!(recorded, note.display().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_editor_with_flags_is_split_correctly() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let record = temp.path().join("argv.txt");
+        let editor = fake_editor(
+            temp.path(),
+            "recorder",
+            &format!(
+                "#!/bin/sh\nprintf '%s|%s' \"$1\" \"$2\" > {}\n",
+                record.display()
+            ),
+        );
+        let note = temp.path().join("ls.md");
+        fs::write(&note, "# ls\n").expect("写笔记");
+
+        let spec = format!("{} -w", editor.display());
+        let launcher = SystemEditor::new(Some(spec), Language::Zh);
+        launcher.open(&note).expect("打开笔记");
+
+        let recorded = fs::read_to_string(&record).expect("读取记录");
+        // 这曾经是 P0 缺陷：整串被当作程序名，导致 NotFound。
+        assert_eq!(recorded, format!("-w|{}", note.display()));
+    }
+}

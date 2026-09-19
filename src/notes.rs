@@ -159,4 +159,3 @@ mod tests {
         assert_eq!(suggestions, vec!["ls", "less", "lsof"]);
     }
 }
-
