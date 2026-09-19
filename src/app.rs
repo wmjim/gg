@@ -893,18 +893,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn no_git_hint_outside_a_repository() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let notes_dir = temp.path().join("notes");
-        fs::create_dir_all(&notes_dir).expect("建笔记目录");
-
-        // /tmp 下通常不在 git 仓库内；若确实在，则不成立，此时跳过
-        if enclosing_git_repository(&notes_dir).is_none() {
-            assert!(enclosing_git_repository(&notes_dir).is_none());
-        }
-    }
-
     /// 空目标集不得退化为「静默成功」。
     #[test]
     fn remove_rejects_an_empty_target_list() {

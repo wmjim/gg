@@ -211,17 +211,22 @@ fn expand_tilde(spec: &str) -> PathBuf {
     PathBuf::from(spec)
 }
 
+/// 测试用夹具：跨平台的假可执行文件。
+///
+/// 其它测试模块（如 `ai`）也需要一个「能解析得到、又不会真的干活」的可执行
+/// 文件；放这里避免各处重复处理平台差异。
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// 造一个可执行文件，返回其路径。
     ///
     /// Windows 上可执行文件必须带可执行扩展名（这里补 `.cmd`，`which` 也据此
     /// 判定可执行），Unix 上需要补可执行位。
-    fn write_fake_bin(dir: &Path, name: &str) -> PathBuf {
+    pub(crate) fn write_fake_bin(dir: &Path, name: &str) -> PathBuf {
+        fs::create_dir_all(dir).expect("创建夹具目录");
+
         let name = if cfg!(windows) {
             format!("{name}.cmd")
         } else {
@@ -248,6 +253,12 @@ mod tests {
 
         path
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::write_fake_bin;
+    use super::*;
 
     #[test]
     fn rejects_empty_spec() {
@@ -302,7 +313,6 @@ mod tests {
     fn supports_unquoted_path_with_spaces_plus_arguments() {
         let temp = tempfile::tempdir().expect("tempdir");
         let nested = temp.path().join("my tools");
-        fs::create_dir_all(&nested).expect("创建带空格的目录");
         let bin = write_fake_bin(&nested, "recorder");
         let spec = format!("{} -w --flag", bin.display());
 

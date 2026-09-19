@@ -345,20 +345,32 @@ mod tests {
         assert!(build_prompt("ls", "en").contains("en"));
     }
 
+    /// 用临时假可执行文件而不是 `sh`：`sh` 在 Windows 上并非必然存在，
+    /// 依赖它会让这些纯解析用例随平台飘。
+    fn fake_bin_spec(temp: &tempfile::TempDir, tail: &str) -> String {
+        let bin = crate::utils::process::test_support::write_fake_bin(temp.path(), "ai");
+        format!("{} {tail}", bin.display())
+    }
+
     #[test]
     fn ai_command_appends_prompt_by_default() {
-        let command = AiCommand::parse("sh -c echo").expect("解析成功");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let command = AiCommand::parse(&fake_bin_spec(&temp, "-c echo")).expect("解析成功");
+
         assert_eq!(
             command.program.args,
             vec!["-c".to_string(), "echo".to_string()]
         );
-        assert!(command.after.is_empty());
-        assert!(command.describe().contains("sh"));
+        assert!(command.after.is_empty(), "无占位符时提示词追加在末尾");
+        assert!(command.describe().contains("ai"), "{}", command.describe());
     }
 
     #[test]
     fn ai_command_honours_prompt_placeholder() {
-        let command = AiCommand::parse("sh -c {prompt} --flag").expect("解析成功");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let command =
+            AiCommand::parse(&fake_bin_spec(&temp, "-c {prompt} --flag")).expect("解析成功");
+
         assert_eq!(command.program.args, vec!["-c".to_string()]);
         assert_eq!(command.after, vec!["--flag".to_string()]);
     }
