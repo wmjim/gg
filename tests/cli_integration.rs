@@ -577,7 +577,7 @@ fn rm_rejects_path_traversal() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("unsupported path characters"));
+        .stderr(predicate::str::contains("路径字符"));
     assert!(notes_dir.join("ls.md").exists());
 }
 
@@ -1078,5 +1078,5 @@ fn path_traversal_is_rejected() {
 
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("unsupported path characters"));
+        .stderr(predicate::str::contains("路径字符"));
 }

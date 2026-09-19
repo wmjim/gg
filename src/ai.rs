@@ -57,24 +57,22 @@ impl AiCommand {
     /// 解析命令行模板。
     ///
     /// 含 `{prompt}` 时按该位置插入提示词，否则追加为最后一个参数。
-    pub fn parse(spec: &str) -> Result<Self> {
+    pub fn parse(spec: &str, lang: Language) -> Result<Self> {
         let spec = spec.trim();
         if spec.is_empty() {
-            bail!("AI 命令行不能为空");
+            bail!("{}", lang.ai_command_empty());
         }
 
         match spec.split_once(PROMPT_PLACEHOLDER) {
             Some((head, tail)) => {
-                let program = resolve_program(head.trim()).with_context(|| {
-                    format!("无法解析 `{head}`（`{PROMPT_PLACEHOLDER}` 之前的命令）")
-                })?;
-                let after = split_command_line(tail).with_context(|| {
-                    format!("无法解析 `{tail}`（`{PROMPT_PLACEHOLDER}` 之后的参数）")
-                })?;
+                let program = resolve_program(head.trim(), lang)
+                    .with_context(|| lang.ai_command_head_parse_failed(head, PROMPT_PLACEHOLDER))?;
+                let after = split_command_line(tail, lang)
+                    .with_context(|| lang.ai_command_tail_parse_failed(tail, PROMPT_PLACEHOLDER))?;
                 Ok(Self { program, after })
             }
             None => Ok(Self {
-                program: resolve_program(spec)?,
+                program: resolve_program(spec, lang)?,
                 after: Vec::new(),
             }),
         }
@@ -122,18 +120,14 @@ impl AiNoteGenerator {
     }
 
     fn resolve(&self) -> Result<AiCommand> {
-        AiCommand::parse(&self.spec).with_context(|| {
-            format!(
-                "无法定位 AI 命令行工具（ai_command / ai_provider 的实际命令为 `{}`）",
-                self.spec
-            )
-        })
+        AiCommand::parse(&self.spec, self.lang)
+            .with_context(|| self.lang.ai_resolve_failed(&self.spec))
     }
 }
 
 impl NoteGenerator for AiNoteGenerator {
     fn description(&self) -> String {
-        match AiCommand::parse(&self.spec) {
+        match AiCommand::parse(&self.spec, self.lang) {
             Ok(command) => command.describe(),
             Err(_) => self.spec.clone(),
         }
@@ -172,11 +166,11 @@ impl NoteGenerator for AiNoteGenerator {
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| anyhow!("无法获取 stdout 管道"))?;
+            .ok_or_else(|| anyhow!("{}", self.lang.ai_pipe_missing("stdout")))?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| anyhow!("无法获取 stderr 管道"))?;
+            .ok_or_else(|| anyhow!("{}", self.lang.ai_pipe_missing("stderr")))?;
 
         // 必须在等待退出的同时持续读取，否则输出填满管道缓冲区就会死锁。
         let stdout_reader = spawn_reader(stdout);
@@ -194,8 +188,8 @@ impl NoteGenerator for AiNoteGenerator {
             bail!("{}", self.lang.ai_timeout(seconds));
         };
 
-        let stdout_bytes = join_reader(stdout_reader)?;
-        let stderr_bytes = join_reader(stderr_reader)?;
+        let stdout_bytes = join_reader(stdout_reader, self.lang)?;
+        let stderr_bytes = join_reader(stderr_reader, self.lang)?;
         let stderr_text = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
 
         if !stderr_text.is_empty() {
@@ -234,11 +228,11 @@ fn spawn_reader<R: Read + Send + 'static>(mut source: R) -> JoinHandle<std::io::
     })
 }
 
-fn join_reader(handle: JoinHandle<std::io::Result<Vec<u8>>>) -> Result<Vec<u8>> {
+fn join_reader(handle: JoinHandle<std::io::Result<Vec<u8>>>, lang: Language) -> Result<Vec<u8>> {
     handle
         .join()
-        .map_err(|_| anyhow!("读取 AI 输出时线程异常退出"))?
-        .context("无法读取 AI 输出")
+        .map_err(|_| anyhow!("{}", lang.ai_reader_thread_failed()))?
+        .context(lang.ai_output_read_failed())
 }
 
 /// 去掉模型习惯性加上的标题，并清理行尾空格与多余空行。
@@ -355,7 +349,8 @@ mod tests {
     #[test]
     fn ai_command_appends_prompt_by_default() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let command = AiCommand::parse(&fake_bin_spec(&temp, "-c echo")).expect("解析成功");
+        let command =
+            AiCommand::parse(&fake_bin_spec(&temp, "-c echo"), Language::Zh).expect("解析成功");
 
         assert_eq!(
             command.program.args,
@@ -368,8 +363,8 @@ mod tests {
     #[test]
     fn ai_command_honours_prompt_placeholder() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let command =
-            AiCommand::parse(&fake_bin_spec(&temp, "-c {prompt} --flag")).expect("解析成功");
+        let command = AiCommand::parse(&fake_bin_spec(&temp, "-c {prompt} --flag"), Language::Zh)
+            .expect("解析成功");
 
         assert_eq!(command.program.args, vec!["-c".to_string()]);
         assert_eq!(command.after, vec!["--flag".to_string()]);
@@ -377,12 +372,12 @@ mod tests {
 
     #[test]
     fn ai_command_rejects_empty_spec() {
-        assert!(AiCommand::parse("   ").is_err());
+        assert!(AiCommand::parse("   ", Language::Zh).is_err());
     }
 
     #[test]
     fn ai_command_reports_missing_binary() {
-        let err = AiCommand::parse("__gg_no_such_ai__").expect_err("必须失败");
+        let err = AiCommand::parse("__gg_no_such_ai__", Language::Zh).expect_err("必须失败");
         assert!(format!("{err:#}").contains("__gg_no_such_ai__"), "{err:#}");
     }
 

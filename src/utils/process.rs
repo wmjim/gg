@@ -4,6 +4,7 @@
 //! 的字符串。既不能把整串当程序名（`Command::new("code -w")` 必然 NotFound），
 //! 也不能盲目按空白切分（会破坏含空格的 Windows 绝对路径）。
 
+use crate::i18n::Language;
 use anyhow::{Context, Result, anyhow, bail};
 use std::io;
 use std::path::PathBuf;
@@ -120,10 +121,10 @@ impl Program {
 /// 3. 退回 shell 词法切分 —— 支持 `"code -w"`、`"'/opt/my editor' -p"`。
 ///
 /// 可执行文件必须真实存在，否则直接报错，避免把失败推迟到 spawn 阶段。
-pub fn resolve_program(spec: &str) -> Result<Program> {
+pub fn resolve_program(spec: &str, lang: Language) -> Result<Program> {
     let spec = spec.trim();
     if spec.is_empty() {
-        bail!("可执行命令不能为空");
+        bail!("{}", lang.program_empty());
     }
 
     let expanded = expand_tilde(spec);
@@ -134,7 +135,7 @@ pub fn resolve_program(spec: &str) -> Result<Program> {
         });
     }
 
-    let tokens = split_command_line(spec)?;
+    let tokens = split_command_line(spec, lang)?;
 
     if let Some(program) = resolve_by_longest_prefix(&tokens) {
         return Ok(program);
@@ -142,10 +143,10 @@ pub fn resolve_program(spec: &str) -> Result<Program> {
 
     let (program, args) = tokens
         .split_first()
-        .ok_or_else(|| anyhow!("可执行命令不能为空"))?;
+        .ok_or_else(|| anyhow!("{}", lang.program_empty()))?;
 
-    let bin = which::which(expand_tilde(program))
-        .with_context(|| format!("未找到可执行文件 `{program}`，请确认已安装或改用绝对路径"))?;
+    let bin =
+        which::which(expand_tilde(program)).with_context(|| lang.program_not_found(program))?;
 
     Ok(Program {
         bin,
@@ -158,7 +159,7 @@ pub fn resolve_program(spec: &str) -> Result<Program> {
 /// 刻意**不**把反斜杠当转义字符：Windows 路径 `C:\Tools\glow.exe` 里的
 /// 反斜杠一旦被吃掉，路径就废了。`shell_words::split` 是 POSIX 语义，
 /// 正是这么做的 —— 它在 Linux 上完全正确，在 Windows 上毁掉每一个路径。
-pub fn split_command_line(spec: &str) -> Result<Vec<String>> {
+pub fn split_command_line(spec: &str, lang: Language) -> Result<Vec<String>> {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_token = false;
@@ -193,7 +194,7 @@ pub fn split_command_line(spec: &str) -> Result<Vec<String>> {
     }
 
     if quote.is_some() {
-        bail!("无法解析可执行命令 {spec:?}，请检查引号是否配对");
+        bail!("{}", lang.command_line_split_failed(spec));
     }
     if in_token {
         tokens.push(current);
@@ -281,14 +282,29 @@ mod tests {
 
     #[test]
     fn rejects_empty_spec() {
-        assert!(resolve_program("   ").is_err());
+        assert!(resolve_program("   ", Language::Zh).is_err());
     }
 
     #[test]
     fn reports_missing_binary_with_the_offending_name() {
-        let err = resolve_program("__gg_missing_binary__").expect_err("must fail");
+        let err = resolve_program("__gg_missing_binary__", Language::Zh).expect_err("must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("__gg_missing_binary__"), "实际信息: {msg}");
+    }
+
+    /// 解析失败的原因必须跟着界面语言走。
+    #[test]
+    fn program_errors_are_localized() {
+        assert_eq!(
+            resolve_program("  ", Language::En).unwrap_err().to_string(),
+            "Executable command cannot be empty"
+        );
+
+        let err = resolve_program("__gg_missing_binary__", Language::En).expect_err("must fail");
+        assert!(
+            format!("{err:#}").contains("not found"),
+            "实际信息: {err:#}"
+        );
     }
 
     #[cfg(unix)]
@@ -298,7 +314,7 @@ mod tests {
         let bin = write_fake_bin(temp.path(), "gg-fake-editor");
         let spec = format!("{} -w --flag", bin.display());
 
-        let program = resolve_program(&spec).expect("resolve split spec");
+        let program = resolve_program(&spec, Language::Zh).expect("resolve split spec");
         assert_eq!(program.bin, bin);
         assert_eq!(program.args, vec!["-w".to_string(), "--flag".to_string()]);
     }
@@ -309,7 +325,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let bin = write_fake_bin(temp.path(), "my editor");
 
-        let program = resolve_program(&bin.display().to_string()).expect("resolve spaced path");
+        let program =
+            resolve_program(&bin.display().to_string(), Language::Zh).expect("resolve spaced path");
         assert_eq!(program.bin, bin);
         assert!(program.args.is_empty());
     }
@@ -321,7 +338,7 @@ mod tests {
         let bin = write_fake_bin(temp.path(), "my editor");
         let spec = format!("\"{}\" -w", bin.display());
 
-        let program = resolve_program(&spec).expect("resolve quoted spec");
+        let program = resolve_program(&spec, Language::Zh).expect("resolve quoted spec");
         assert_eq!(program.bin, bin);
         assert_eq!(program.args, vec!["-w".to_string()]);
     }
@@ -335,7 +352,7 @@ mod tests {
         let bin = write_fake_bin(&nested, "recorder");
         let spec = format!("{} -w --flag", bin.display());
 
-        let program = resolve_program(&spec).expect("resolve unquoted spaced spec");
+        let program = resolve_program(&spec, Language::Zh).expect("resolve unquoted spaced spec");
         assert_eq!(program.bin, bin);
         assert_eq!(program.args, vec!["-w".to_string(), "--flag".to_string()]);
     }
@@ -343,7 +360,8 @@ mod tests {
     #[test]
     fn splitter_preserves_windows_backslashes() {
         // POSIX 语义的分词器会把这些反斜杠当转义吃掉，路径就废了
-        let tokens = split_command_line(r"C:\Tools\glow.exe -s dark -w 80").expect("切分成功");
+        let tokens =
+            split_command_line(r"C:\Tools\glow.exe -s dark -w 80", Language::Zh).expect("切分成功");
         assert_eq!(
             tokens,
             vec![
@@ -359,11 +377,11 @@ mod tests {
     #[test]
     fn splitter_honours_quotes_and_collapses_whitespace() {
         assert_eq!(
-            split_command_line("  \"a b\"  'c d'  e  ").expect("切分成功"),
+            split_command_line("  \"a b\"  'c d'  e  ", Language::Zh).expect("切分成功"),
             vec!["a b".to_string(), "c d".to_string(), "e".to_string()]
         );
         assert_eq!(
-            split_command_line("").expect("切分成功"),
+            split_command_line("", Language::Zh).expect("切分成功"),
             Vec::<String>::new()
         );
     }
@@ -371,7 +389,7 @@ mod tests {
     #[test]
     fn splitter_keeps_empty_quoted_token() {
         assert_eq!(
-            split_command_line("cmd \"\"").expect("切分成功"),
+            split_command_line("cmd \"\"", Language::Zh).expect("切分成功"),
             vec!["cmd".to_string(), String::new()]
         );
     }
@@ -385,7 +403,7 @@ mod tests {
         let bin = write_fake_bin(temp.path(), "fake");
 
         let spec = format!("{} -p --output-format text", bin.display());
-        let program = resolve_program(&spec).expect("解析成功");
+        let program = resolve_program(&spec, Language::Zh).expect("解析成功");
         assert_eq!(program.bin, bin);
         assert_eq!(
             program.args,
@@ -399,14 +417,14 @@ mod tests {
 
     #[test]
     fn detects_unbalanced_quotes() {
-        let err = resolve_program("\"unterminated").expect_err("must fail");
+        let err = resolve_program("\"unterminated", Language::Zh).expect_err("must fail");
         assert!(format!("{err:#}").contains("引号"));
     }
 
     #[cfg(unix)]
     #[test]
     fn resolves_bare_command_from_path() {
-        let program = resolve_program("sh").expect("resolve sh from PATH");
+        let program = resolve_program("sh", Language::Zh).expect("resolve sh from PATH");
         assert!(program.bin.is_absolute());
         assert!(program.args.is_empty());
     }

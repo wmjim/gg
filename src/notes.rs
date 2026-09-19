@@ -1,3 +1,4 @@
+use crate::i18n::Language;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,15 +7,17 @@ pub fn note_path(notes_dir: &Path, command: &str) -> PathBuf {
     notes_dir.join(format!("{command}.md"))
 }
 
-pub fn validate_command_name(command: &str) -> Result<()> {
-    anyhow::ensure!(!command.is_empty(), "Command name cannot be empty");
+pub fn validate_command_name(command: &str, lang: Language) -> Result<()> {
+    anyhow::ensure!(!command.is_empty(), "{}", lang.note_command_empty());
     anyhow::ensure!(
         !command.chars().any(char::is_whitespace),
-        "Command name must be a single token without spaces"
+        "{}",
+        lang.note_command_has_whitespace()
     );
     anyhow::ensure!(
         !command.chars().any(|c| c == '/' || c == '\\' || c == ':'),
-        "Command name contains unsupported path characters"
+        "{}",
+        lang.note_command_has_path_chars()
     );
     Ok(())
 }
@@ -72,29 +75,34 @@ impl ContentMatch {
     }
 }
 
-pub fn read_note(notes_dir: &Path, command: &str) -> Result<Option<String>> {
+pub fn read_note(notes_dir: &Path, command: &str, lang: Language) -> Result<Option<String>> {
     let path = note_path(notes_dir, command);
     if !path.exists() {
         return Ok(None);
     }
 
     let content = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read note file: {}", path.display()))?;
+        .with_context(|| lang.note_read_failed(&path.display().to_string()))?;
     Ok(Some(content))
 }
 
-pub fn write_note(notes_dir: &Path, command: &str, content: &str) -> Result<PathBuf> {
+pub fn write_note(
+    notes_dir: &Path,
+    command: &str,
+    content: &str,
+    lang: Language,
+) -> Result<PathBuf> {
     fs::create_dir_all(notes_dir)
-        .with_context(|| format!("Failed to create notes directory: {}", notes_dir.display()))?;
+        .with_context(|| lang.notes_dir_create_failed(&notes_dir.display().to_string()))?;
 
     let path = note_path(notes_dir, command);
     fs::write(&path, content)
-        .with_context(|| format!("Failed to write note: {}", path.display()))?;
+        .with_context(|| lang.note_write_failed(&path.display().to_string()))?;
     Ok(path)
 }
-pub fn ensure_note_file(notes_dir: &Path, command: &str) -> Result<EnsuredNote> {
+pub fn ensure_note_file(notes_dir: &Path, command: &str, lang: Language) -> Result<EnsuredNote> {
     fs::create_dir_all(notes_dir)
-        .with_context(|| format!("Failed to create notes directory: {}", notes_dir.display()))?;
+        .with_context(|| lang.notes_dir_create_failed(&notes_dir.display().to_string()))?;
 
     let path = note_path(notes_dir, command);
     if path.exists() {
@@ -104,7 +112,7 @@ pub fn ensure_note_file(notes_dir: &Path, command: &str) -> Result<EnsuredNote> 
         });
     }
 
-    fs::write(&path, "").with_context(|| format!("Failed to create note: {}", path.display()))?;
+    fs::write(&path, "").with_context(|| lang.note_create_failed(&path.display().to_string()))?;
     Ok(EnsuredNote {
         path,
         created: true,
@@ -112,18 +120,18 @@ pub fn ensure_note_file(notes_dir: &Path, command: &str) -> Result<EnsuredNote> 
 }
 
 /// 删除笔记文件。返回 `false` 表示该命令本来就没有笔记。
-pub fn remove_note(notes_dir: &Path, command: &str) -> Result<bool> {
+pub fn remove_note(notes_dir: &Path, command: &str, lang: Language) -> Result<bool> {
     let path = note_path(notes_dir, command);
     if !path.is_file() {
         return Ok(false);
     }
 
-    fs::remove_file(&path).with_context(|| format!("Failed to remove note: {}", path.display()))?;
+    fs::remove_file(&path).with_context(|| lang.note_remove_failed(&path.display().to_string()))?;
     Ok(true)
 }
 
 /// 列出笔记命令，同时返回无法读取而被跳过的条目。
-pub fn scan_commands(notes_dir: &Path) -> Result<Found<String>> {
+pub fn scan_commands(notes_dir: &Path, lang: Language) -> Result<Found<String>> {
     if !notes_dir.exists() {
         return Ok(Found::none());
     }
@@ -132,7 +140,7 @@ pub fn scan_commands(notes_dir: &Path) -> Result<Found<String>> {
     let mut skipped = Vec::new();
 
     let entries = fs::read_dir(notes_dir)
-        .with_context(|| format!("Failed to read notes directory: {}", notes_dir.display()))?;
+        .with_context(|| lang.notes_dir_read_failed(&notes_dir.display().to_string()))?;
 
     for entry in entries {
         // 单条 readdir 失败（权限、竞态删除）只跳过该条，不放弃整个目录。
@@ -185,9 +193,13 @@ pub fn scan_commands(notes_dir: &Path) -> Result<Found<String>> {
     })
 }
 
-pub fn search_commands_by_name(notes_dir: &Path, keyword: &str) -> Result<Found<String>> {
+pub fn search_commands_by_name(
+    notes_dir: &Path,
+    keyword: &str,
+    lang: Language,
+) -> Result<Found<String>> {
     let keyword = keyword.to_ascii_lowercase();
-    let found = scan_commands(notes_dir)?;
+    let found = scan_commands(notes_dir, lang)?;
     let mut items: Vec<String> = found
         .items
         .into_iter()
@@ -203,18 +215,22 @@ pub fn search_commands_by_name(notes_dir: &Path, keyword: &str) -> Result<Found<
 /// 按正文内容搜索笔记，返回 grep 风格的命中行。
 ///
 /// 刻意不做 Markdown 语法营剥：用户能直接看到原文上下文，行为可预测。
-pub fn search_notes_by_content(notes_dir: &Path, keyword: &str) -> Result<Found<ContentMatch>> {
+pub fn search_notes_by_content(
+    notes_dir: &Path,
+    keyword: &str,
+    lang: Language,
+) -> Result<Found<ContentMatch>> {
     let needle = keyword.to_ascii_lowercase();
     if needle.is_empty() {
         return Ok(Found::none());
     }
 
-    let found = scan_commands(notes_dir)?;
+    let found = scan_commands(notes_dir, lang)?;
     let mut skipped = found.skipped;
     let mut items = Vec::new();
 
     for command in found.items {
-        let content = match read_note(notes_dir, &command) {
+        let content = match read_note(notes_dir, &command, lang) {
             Ok(Some(content)) => content,
             Ok(None) => continue,
             // 单个笔记读不了不应中断整次搜索。
@@ -287,11 +303,30 @@ mod tests {
 
     #[test]
     fn command_name_validation() {
-        assert!(validate_command_name("ls").is_ok());
-        assert!(validate_command_name("git-status").is_ok());
-        assert!(validate_command_name("docker run").is_err());
-        assert!(validate_command_name("../ls").is_err());
-        assert!(validate_command_name("C:ls").is_err());
+        assert!(validate_command_name("ls", Language::Zh).is_ok());
+        assert!(validate_command_name("git-status", Language::Zh).is_ok());
+        assert!(validate_command_name("docker run", Language::Zh).is_err());
+        assert!(validate_command_name("../ls", Language::Zh).is_err());
+        assert!(validate_command_name("C:ls", Language::Zh).is_err());
+    }
+
+    /// 校验失败的原因必须跟着界面语言走，不能泄漏 `notes.rs` 内部的英文。
+    #[test]
+    fn command_name_errors_are_localized() {
+        let zh = validate_command_name("docker run", Language::Zh).expect_err("含空格应被拒");
+        assert!(format!("{zh:#}").contains("不能含空格"), "{zh:#}");
+
+        let en = validate_command_name("docker run", Language::En).expect_err("含空格应被拒");
+        assert_eq!(
+            format!("{en:#}"),
+            "Command name must be a single token without spaces"
+        );
+
+        let traversal = validate_command_name("../ls", Language::En).expect_err("路径穿越应被拒");
+        assert!(
+            format!("{traversal:#}").contains("unsupported path characters"),
+            "{traversal:#}"
+        );
     }
 
     #[test]
@@ -311,12 +346,12 @@ mod tests {
     fn ensure_note_file_reports_whether_it_created_the_file() {
         let temp = tempfile::tempdir().expect("tempdir");
 
-        let first = ensure_note_file(temp.path(), "ls").expect("新建笔记");
+        let first = ensure_note_file(temp.path(), "ls", Language::Zh).expect("新建笔记");
         assert!(first.created, "首次调用应报告已创建");
         assert!(first.path.exists());
 
         fs::write(&first.path, "# ls\n").expect("写入内容");
-        let second = ensure_note_file(temp.path(), "ls").expect("已有笔记");
+        let second = ensure_note_file(temp.path(), "ls", Language::Zh).expect("已有笔记");
         assert!(!second.created, "已存在时不得报告创建");
         let content = fs::read_to_string(&second.path).expect("读取笔记");
         assert_eq!(content, "# ls\n", "已存在的笔记内容不得被清空");
@@ -333,7 +368,7 @@ mod tests {
         fs::write(temp.path().join("ls.md"), "# ls\n列出目录\n").expect("写笔记");
         fs::write(temp.path().join("ignore.txt"), "递归").expect("写非 md 文件");
 
-        let found = search_notes_by_content(temp.path(), "递归").expect("搜索正文");
+        let found = search_notes_by_content(temp.path(), "递归", Language::Zh).expect("搜索正文");
         let rendered: Vec<String> = found.items.iter().map(ContentMatch::render).collect();
 
         assert_eq!(
@@ -342,25 +377,26 @@ mod tests {
         );
         assert!(found.skipped.is_empty(), "不该有被跳过的条目");
 
-        let none = search_notes_by_content(temp.path(), "不存在的词").expect("搜索正文");
+        let none =
+            search_notes_by_content(temp.path(), "不存在的词", Language::Zh).expect("搜索正文");
         assert!(none.items.is_empty());
     }
 
     #[test]
     fn remove_note_deletes_the_file_and_reports_absence() {
         let temp = tempfile::tempdir().expect("tempdir");
-        write_note(temp.path(), "ls", "# ls\n").expect("写笔记");
-        write_note(temp.path(), "grep", "# grep\n").expect("写笔记");
+        write_note(temp.path(), "ls", "# ls\n", Language::Zh).expect("写笔记");
+        write_note(temp.path(), "grep", "# grep\n", Language::Zh).expect("写笔记");
 
         assert!(
-            remove_note(temp.path(), "ls").expect("删除成功"),
+            remove_note(temp.path(), "ls", Language::Zh).expect("删除成功"),
             "存在则应删除"
         );
         assert!(!temp.path().join("ls.md").exists());
         assert!(temp.path().join("grep.md").exists(), "不应误删其它笔记");
 
         assert!(
-            !remove_note(temp.path(), "ls").expect("再次删除不报错"),
+            !remove_note(temp.path(), "ls", Language::Zh).expect("再次删除不报错"),
             "已不存在应返回 false"
         );
     }
@@ -371,7 +407,7 @@ mod tests {
         fs::create_dir(temp.path().join("somedir.md")).expect("建同名目录");
 
         assert!(
-            !remove_note(temp.path(), "somedir").expect("目录不当文件删"),
+            !remove_note(temp.path(), "somedir", Language::Zh).expect("目录不当文件删"),
             "同名目录不应被当作笔记删除"
         );
         assert!(temp.path().join("somedir.md").is_dir());
@@ -387,7 +423,7 @@ mod tests {
             return;
         };
 
-        let found = scan_commands(temp.path()).expect("扫描目录不应整体失败");
+        let found = scan_commands(temp.path(), Language::Zh).expect("扫描目录不应整体失败");
         assert_eq!(found.items, vec!["ls".to_string()]);
         assert_eq!(found.skipped.len(), 1, "非法文件名应被记录并跳过");
     }
@@ -416,7 +452,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let missing = temp.path().join("nope");
 
-        let found = scan_commands(&missing).expect("目录不存在不是错误");
+        let found = scan_commands(&missing, Language::Zh).expect("目录不存在不是错误");
         assert!(found.items.is_empty());
         assert!(found.skipped.is_empty());
     }
@@ -426,7 +462,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(temp.path().join("aws.md"), "AWS CLI 用法\n").expect("写笔记");
 
-        let found = search_notes_by_content(temp.path(), "aws").expect("搜索正文");
+        let found = search_notes_by_content(temp.path(), "aws", Language::Zh).expect("搜索正文");
         assert_eq!(found.items.len(), 1, "搜索应忽略大小写");
     }
 }

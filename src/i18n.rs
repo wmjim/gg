@@ -245,6 +245,107 @@ impl Language {
             en: "No usable editor found. Set GG_EDITOR/EDITOR/VISUAL or install nvim/vim/helix/nano.",
         },
 
+        // ---------- 错误 ----------
+        //
+        // 错误文案同样只有这一处来源：`main` 只负责加前缀，细节全部由这里
+        // 决定语种，避免出现「中文提示 + 英文报错」的混杂输出。
+        error_prefix() => {
+            zh: "错误",
+            en: "Error",
+        },
+        note_command_empty() => {
+            zh: "命令名不能为空",
+            en: "Command name cannot be empty",
+        },
+        note_command_has_whitespace() => {
+            zh: "命令名必须是单个词，不能含空格",
+            en: "Command name must be a single token without spaces",
+        },
+        note_command_has_path_chars() => {
+            zh: "命令名不能包含 `/`、`\\`、`:` 这些路径字符",
+            en: "Command name contains unsupported path characters",
+        },
+        note_read_failed(path: &str) => {
+            zh: "无法读取笔记文件: {path}",
+            en: "Failed to read note file: {path}",
+        },
+        note_write_failed(path: &str) => {
+            zh: "无法写入笔记: {path}",
+            en: "Failed to write note: {path}",
+        },
+        note_create_failed(path: &str) => {
+            zh: "无法新建笔记: {path}",
+            en: "Failed to create note: {path}",
+        },
+        note_remove_failed(path: &str) => {
+            zh: "无法删除笔记: {path}",
+            en: "Failed to remove note: {path}",
+        },
+        notes_dir_create_failed(path: &str) => {
+            zh: "无法创建笔记目录: {path}",
+            en: "Failed to create notes directory: {path}",
+        },
+        notes_dir_read_failed(path: &str) => {
+            zh: "无法读取笔记目录: {path}",
+            en: "Failed to read notes directory: {path}",
+        },
+        stdout_write_failed(err: &str) => {
+            zh: "无法写入标准输出: {err}",
+            en: "Failed to write to stdout: {err}",
+        },
+        remove_needs_a_target() => {
+            zh: "需要指定至少一个要删除的命令名",
+            en: "At least one command name to remove is required",
+        },
+        help_print_failed() => {
+            zh: "无法输出帮助信息",
+            en: "Failed to print help",
+        },
+        unknown_language_choice(choice: &str) => {
+            zh: "无法识别语言选项: {choice}",
+            en: "Unrecognized language option: {choice}",
+        },
+        program_empty() => {
+            zh: "可执行命令不能为空",
+            en: "Executable command cannot be empty",
+        },
+        program_not_found(name: &str) => {
+            zh: "未找到可执行文件 `{name}`，请确认已安装或改用绝对路径",
+            en: "Executable `{name}` not found; install it or use an absolute path",
+        },
+        command_line_split_failed(spec: &str) => {
+            zh: "无法解析可执行命令 `{spec}`，请检查引号是否配对",
+            en: "Cannot parse executable command `{spec}`; check that quotes are balanced",
+        },
+        ai_command_empty() => {
+            zh: "AI 命令行不能为空",
+            en: "AI command line cannot be empty",
+        },
+        ai_command_head_parse_failed(head: &str, placeholder: &str) => {
+            zh: "无法解析 `{head}`（`{placeholder}` 之前的命令）",
+            en: "Cannot parse `{head}` (the command before `{placeholder}`)",
+        },
+        ai_command_tail_parse_failed(tail: &str, placeholder: &str) => {
+            zh: "无法解析 `{tail}`（`{placeholder}` 之后的参数）",
+            en: "Cannot parse `{tail}` (the arguments after `{placeholder}`)",
+        },
+        ai_resolve_failed(spec: &str) => {
+            zh: "无法定位 AI 命令行工具（ai_command / ai_provider 的实际命令为 `{spec}`）",
+            en: "Cannot locate the AI command-line tool (ai_command / ai_provider resolves to `{spec}`)",
+        },
+        ai_pipe_missing(stream: &str) => {
+            zh: "无法获取 AI 命令的 {stream} 管道",
+            en: "Cannot capture the AI command's {stream} pipe",
+        },
+        ai_output_read_failed() => {
+            zh: "无法读取 AI 输出",
+            en: "Failed to read the AI output",
+        },
+        ai_reader_thread_failed() => {
+            zh: "读取 AI 输出时线程异常退出",
+            en: "The thread reading the AI output terminated abnormally",
+        },
+
         // ---------- CLI 帮助 ----------
         cli_about() => {
             zh: "像 man 一样查询你自己的命令笔记",

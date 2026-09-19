@@ -16,7 +16,7 @@ fn main() -> ExitCode {
     match gg::run(cli) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("Error: {err:#}");
+            eprintln!("{}: {err:#}", lang.error_prefix());
             ExitCode::FAILURE
         }
     }

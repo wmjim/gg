@@ -79,7 +79,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
 
     match parts.action {
         Action::List => {
-            let found = notes::scan_commands(&notes_dir)?;
+            let found = notes::scan_commands(&notes_dir, lang)?;
             warn_skipped(&found.skipped, lang);
             write_commands(&found.items, lang)?;
             Ok(ExitCode::SUCCESS)
@@ -91,7 +91,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
         .map_or(ExitCode::SUCCESS, ExitCode::from)),
         Action::Search { keyword, content } => {
             if content {
-                let found = notes::search_notes_by_content(&notes_dir, &keyword)?;
+                let found = notes::search_notes_by_content(&notes_dir, &keyword, lang)?;
                 warn_skipped(&found.skipped, lang);
                 let lines = found
                     .items
@@ -100,7 +100,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
                     .collect::<Vec<_>>();
                 output::write_lines(io::stdout().lock(), lines)?;
             } else {
-                let found = notes::search_commands_by_name(&notes_dir, &keyword)?;
+                let found = notes::search_commands_by_name(&notes_dir, &keyword, lang)?;
                 warn_skipped(&found.skipped, lang);
                 write_commands(&found.items, lang)?;
             }
@@ -159,7 +159,7 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
 fn print_help(lang: Language) -> Result<()> {
     if let Err(err) = crate::cli::command(lang).print_help() {
         if !crate::utils::output::is_broken_pipe(&err) {
-            return Err(err).context("无法输出帮助信息");
+            return Err(err).context(lang.help_print_failed());
         }
     }
     Ok(())
@@ -235,14 +235,14 @@ fn remove_notes(
     lang: Language,
 ) -> Result<RemoveOutcome> {
     // 空目标集是静默空操作，宁可明确报错
-    anyhow::ensure!(!commands.is_empty(), "需要指定至少一个要删除的命令名");
+    anyhow::ensure!(!commands.is_empty(), "{}", lang.remove_needs_a_target());
 
     // 先校验并收集目标，避免「删了几个才发现有笔误」的半成品状态
     let mut targets: Vec<(String, PathBuf)> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
 
     for command in commands {
-        notes::validate_command_name(command)?;
+        notes::validate_command_name(command, lang)?;
         let path = notes::note_path(notes_dir, command);
         if path.is_file() {
             targets.push((command.clone(), path));
@@ -276,7 +276,7 @@ fn remove_notes(
     }
 
     for (command, path) in &targets {
-        notes::remove_note(notes_dir, command)?;
+        notes::remove_note(notes_dir, command, lang)?;
         eprintln!("{}", lang.note_removed(&path.display().to_string()));
     }
 
@@ -318,7 +318,8 @@ fn ask_language(prompter: &dyn Prompter) -> Result<Language> {
         &bootstrap.invalid_input(),
     )?;
 
-    Language::parse(&chosen).ok_or_else(|| anyhow::anyhow!("无法识别语言选项: {chosen}"))
+    Language::parse(&chosen)
+        .ok_or_else(|| anyhow::anyhow!("{}", bootstrap.unknown_language_choice(&chosen)))
 }
 
 /// 查询动作的最终状态，决定退出码。
@@ -382,11 +383,11 @@ impl<'a> QueryService<'a> {
     }
 
     pub fn query(&self, command: &str, options: QueryOptions) -> Result<QueryOutcome> {
-        notes::validate_command_name(command)?;
         let lang = self.config.language();
+        notes::validate_command_name(command, lang)?;
 
         if options.edit {
-            let ensured = notes::ensure_note_file(self.notes_dir, command)?;
+            let ensured = notes::ensure_note_file(self.notes_dir, command, lang)?;
             if ensured.created {
                 eprintln!("{}", lang.note_created(&ensured.path.display().to_string()));
             }
@@ -394,7 +395,7 @@ impl<'a> QueryService<'a> {
             return Ok(QueryOutcome::EditorOpened);
         }
 
-        if let Some(markdown) = notes::read_note(self.notes_dir, command)? {
+        if let Some(markdown) = notes::read_note(self.notes_dir, command, lang)? {
             self.deps
                 .renderer
                 .render(&markdown, options.target, command)?;
@@ -406,7 +407,7 @@ impl<'a> QueryService<'a> {
     }
 
     fn report_miss(&self, command: &str, lang: Language) -> Result<()> {
-        let found = notes::scan_commands(self.notes_dir)?;
+        let found = notes::scan_commands(self.notes_dir, lang)?;
         let suggestions = notes::suggest_commands(command, &found.items, SUGGESTION_LIMIT);
         eprintln!("{}", miss_message(command, &suggestions, lang));
         Ok(())
@@ -505,13 +506,9 @@ impl<'a> QueryService<'a> {
     }
 
     fn save(&self, command: &str, generated: &str) -> Result<()> {
-        let path = notes::write_note(self.notes_dir, command, generated)?;
-        eprintln!(
-            "{}",
-            self.config
-                .language()
-                .note_saved(&path.display().to_string())
-        );
+        let lang = self.config.language();
+        let path = notes::write_note(self.notes_dir, command, generated, lang)?;
+        eprintln!("{}", lang.note_saved(&path.display().to_string()));
         Ok(())
     }
 }
@@ -919,7 +916,7 @@ mod tests {
         )
         .expect_err("路径穿越必须被拒绝");
 
-        assert!(format!("{err:#}").contains("unsupported path characters"));
+        assert!(format!("{err:#}").contains("路径字符"));
         assert_eq!(note_files(&temp), vec!["ls"], "拒绝后不应有副作用");
     }
 
@@ -1289,7 +1286,7 @@ mod tests {
         let err = QueryService::new(temp.path(), &config, &deps)
             .query("../etc/passwd", options())
             .expect_err("路径穿越必须被拒绝");
-        assert!(format!("{err:#}").contains("unsupported path characters"));
+        assert!(format!("{err:#}").contains("路径字符"));
     }
 
     #[test]

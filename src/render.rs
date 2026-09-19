@@ -56,7 +56,7 @@ impl MarkdownRenderer {
     fn render_to_terminal(&self, markdown: &str) {
         if let Err(err) = self.render_with_glow(markdown) {
             eprintln!("{}", self.lang.glow_failed(&err.to_string()));
-            print_raw(markdown);
+            print_raw(markdown, self.lang);
         }
     }
 
@@ -93,7 +93,8 @@ impl MarkdownRenderer {
 
     fn render_with_glow(&self, markdown: &str) -> Result<()> {
         let spec = glow_bin();
-        let program = resolve_program(&spec).with_context(|| self.lang.glow_not_found(&spec))?;
+        let program =
+            resolve_program(&spec, self.lang).with_context(|| self.lang.glow_not_found(&spec))?;
 
         match run_glow_via_stdin(&program, markdown) {
             Ok(()) => Ok(()),
@@ -328,7 +329,7 @@ fn render_code_block(code: &str, lang: &str) -> String {
     )
 }
 
-fn print_raw(markdown: &str) {
+fn print_raw(markdown: &str, lang: Language) {
     let text = if markdown.ends_with('\n') {
         markdown.to_string()
     } else {
@@ -336,7 +337,7 @@ fn print_raw(markdown: &str) {
     };
 
     if let Err(err) = crate::utils::output::write_text(io::stdout().lock(), &text) {
-        eprintln!("无法写入标准输出: {err:#}");
+        eprintln!("{}", lang.stdout_write_failed(&format!("{err:#}")));
     }
 }
 

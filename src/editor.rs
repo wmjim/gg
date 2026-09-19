@@ -50,7 +50,7 @@ impl SystemEditor {
 impl EditorLauncher for SystemEditor {
     fn open(&self, path: &Path) -> Result<()> {
         if let Some(spec) = self.configured.as_deref() {
-            match try_editor(spec, path) {
+            match try_editor(spec, path, self.lang) {
                 Ok(()) => return Ok(()),
                 Err(EditorFailure::NotInstalled(err)) => {
                     eprintln!("{}", self.lang.configured_editor_missing(spec));
@@ -66,7 +66,7 @@ impl EditorLauncher for SystemEditor {
         // 早期版本用 else if 把它们绑定在一起，导致 config.editor 指的软件
         // 未安装时会直接跳过 GG_EDITOR/EDITOR，反而去开 nvim。
         if let Some(spec) = env_editor_spec() {
-            match try_editor(&spec, path) {
+            match try_editor(&spec, path, self.lang) {
                 Ok(()) => return Ok(()),
                 Err(EditorFailure::NotInstalled(err)) => {
                     eprintln!("{}", self.lang.env_editor_missing(&spec));
@@ -82,8 +82,8 @@ impl EditorLauncher for SystemEditor {
     }
 }
 
-fn try_editor(spec: &str, path: &Path) -> std::result::Result<(), EditorFailure> {
-    let program = resolve_program(spec).map_err(EditorFailure::NotInstalled)?;
+fn try_editor(spec: &str, path: &Path, lang: Language) -> std::result::Result<(), EditorFailure> {
+    let program = resolve_program(spec, lang).map_err(EditorFailure::NotInstalled)?;
     run_editor(&program, path).map_err(EditorFailure::RunFailed)
 }
 
@@ -280,8 +280,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let note = note_in(temp.path());
 
-        let failure = retry_on_text_file_busy(|| try_editor("__gg_no_such_editor__", &note))
-            .expect_err("必须失败");
+        let failure =
+            retry_on_text_file_busy(|| try_editor("__gg_no_such_editor__", &note, Language::Zh))
+                .expect_err("必须失败");
         assert!(
             matches!(failure, EditorFailure::NotInstalled(_)),
             "实际: {failure:?}"
@@ -297,8 +298,10 @@ mod tests {
         let editor = fake_editor(temp.path(), "quitter", "#!/bin/sh\nexit 3\n");
         let note = note_in(temp.path());
 
-        let failure = retry_on_text_file_busy(|| try_editor(&editor.display().to_string(), &note))
-            .expect_err("必须失败");
+        let failure = retry_on_text_file_busy(|| {
+            try_editor(&editor.display().to_string(), &note, Language::Zh)
+        })
+        .expect_err("必须失败");
         match failure {
             EditorFailure::RunFailed(err) => {
                 let msg = format!("{err:#}");
