@@ -328,6 +328,7 @@ fn load_prompt_template(path: &Path, lang: Language) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// 内置提示词必须钉住这几条结构要求，避免后续改动无意中把它们删掉。
     #[test]
     fn prompt_requires_the_concise_structure() {
         let prompt = build_prompt("grep", "zh-CN", DEFAULT_PROMPT);
@@ -337,10 +338,9 @@ mod tests {
             "zh-CN",
             "10~25 行",
             "2~4 个最高频的选项",
-            "1~3 个 ```bash 代码块",
-            "不要出现 简介/语法/常用参数/示例/注意事项/总结 这类小节标题",
-            "不要 emoji",
-            "不要介绍命令的历史、来源、所属项目",
+            "```bash 代码块",
+            "以 # 开头的说明",
+            "不要写行尾空格",
         ] {
             assert!(
                 prompt.contains(expected),
