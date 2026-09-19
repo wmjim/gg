@@ -46,11 +46,14 @@ fn write_note(notes_dir: &Path, command: &str, markdown: &str) {
 /// - Windows 的可执行文件必须带 `.cmd` / `.exe` 之类扩展名，
 ///   `CreateProcess` 不会执行一个无扩展名的文件（连 `which` 也找不到）；
 /// - Unix 上需要补可执行位。
-fn write_fake_tool(temp: &TempDir, name: &str, unix_body: &str, windows_body: &str) -> PathBuf {
+fn write_fake_tool(dir: &Path, name: &str, unix_body: &str, windows_body: &str) -> PathBuf {
+    // 自己保证目录存在：调用方写 bin 目录这类场景很容易漏掉建目录
+    fs::create_dir_all(dir).unwrap_or_else(|err| panic!("创建夹具目录 {}: {err}", dir.display()));
+
     let path = if cfg!(windows) {
-        temp.path().join(format!("{name}.cmd"))
+        dir.join(format!("{name}.cmd"))
     } else {
-        temp.path().join(name)
+        dir.join(name)
     };
     let body = if cfg!(windows) {
         windows_body
@@ -81,7 +84,7 @@ fn write_config(temp: &TempDir, body: &str) {
 /// 输出以 `# 标题` 开头，用来验证首行标题会被剥离。
 fn create_fake_claude(temp: &TempDir) -> PathBuf {
     write_fake_tool(
-        temp,
+        temp.path(),
         "fake-claude",
         "#!/bin/sh\n\
          if [ \"$1\" = \"--version\" ]; then echo 'claude 0.0.1'; exit 0; fi\n\
@@ -100,23 +103,26 @@ fn create_fake_claude(temp: &TempDir) -> PathBuf {
     )
 }
 
-/// 创建一个会记录自己 argv 的假 AI 工具，返回 (可执行文件, argv 记录文件)。
-fn fake_ai_tool(temp: &TempDir, name: &str) -> (PathBuf, PathBuf) {
-    let record = temp.path().join(format!("{name}-argv.txt"));
+/// 假 AI 工具，返回 (可执行文件, 被调用标记文件)。
+///
+/// 工具运行时输出 `tag`，据此判断到底调用了哪一个后端。**不录制 argv**：
+/// Windows 上提示词是多行文本，经 cmd 传递时 `echo %*` 会被换行截断，靠它
+/// 断言参数本来就不可靠。参数的拼接由 `config` / `ai` 的单测覆盖。
+fn fake_ai_tool(dir: &Path, name: &str, tag: &str) -> (PathBuf, PathBuf) {
+    let called = dir.join(format!("{name}-called"));
     let bin = write_fake_tool(
-        temp,
+        dir,
         name,
-        // 先记录 argv，再输出一段合法笔记正文，避免被判为「AI 返回空内容」
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\necho 'foo: test command.'\n",
-            record.display()
+            "#!/bin/sh\n: > {}\necho '{tag}'\necho 'foo: test command.'\n",
+            called.display()
         ),
         &format!(
-            "@echo off\r\necho %* >> \"{}\"\r\necho foo: test command.\r\n",
-            record.display()
+            "@echo off\r\ntype nul > \"{}\"\r\necho {tag}\r\necho foo: test command.\r\n",
+            called.display()
         ),
     );
-    (bin, record)
+    (bin, called)
 }
 
 /// 把目录插到子进程 PATH 最前面，用于让预设（claude/codex/gemini）命中假工具。
@@ -130,10 +136,6 @@ fn prepend_path(cmd: &mut assert_cmd::Command, dir: &Path) {
         })
         .expect("拼接 PATH");
     cmd.env("PATH", joined);
-}
-
-fn read_record(path: &Path) -> String {
-    fs::read_to_string(path).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- 基础查询
@@ -254,7 +256,7 @@ fn edit_notifies_when_it_creates_an_empty_note() {
 
     // 用假编辑器，避开真实编辑器的交互阻塞。
     let editor = write_fake_tool(
-        &temp,
+        temp.path(),
         "noop-editor",
         "#!/bin/sh\nexit 0\n",
         "@echo off\r\nexit /b 0\r\n",
@@ -282,7 +284,7 @@ fn edit_does_not_claim_creation_for_an_existing_note() {
     write_note(&notes_dir, "ls", "# ls\n");
 
     let editor = write_fake_tool(
-        &temp,
+        temp.path(),
         "noop-editor",
         "#!/bin/sh\nexit 0\n",
         "@echo off\r\nexit /b 0\r\n",
@@ -316,7 +318,7 @@ fn missing_configured_editor_falls_through_to_env_editor() {
 
     let marker = temp.path().join("env-editor-ran");
     let env_editor = write_fake_tool(
-        &temp,
+        temp.path(),
         "env-editor",
         &format!("#!/bin/sh\necho \"$1\" > {}\n", marker.display()),
         &format!("@echo off\r\necho %1 > \"{}\"\r\n", marker.display()),
@@ -356,7 +358,7 @@ fn failing_editor_is_reported_instead_of_silently_falling_back() {
     write_note(&notes_dir, "ls", "# ls\n");
 
     let editor = write_fake_tool(
-        &temp,
+        temp.path(),
         "failing-editor",
         "#!/bin/sh\nexit 3\n",
         "@echo off\r\nexit /b 3\r\n",
@@ -622,7 +624,7 @@ fn show_supports_the_edit_flag() {
     write_note(&notes_dir, "rm", "# rm\n");
 
     let editor = write_fake_tool(
-        &temp,
+        temp.path(),
         "noop-editor",
         "#!/bin/sh\nexit 0\n",
         "@echo off\r\nexit /b 0\r\n",
@@ -675,8 +677,8 @@ fn ai_provider_none_disables_fallback() {
     write_config(&temp, "language = \"zh\"\nai_provider = \"none\"\n");
 
     let mut cmd = command_for(&temp);
-    // 即便有可用的 claude，也不应被调用
-    let (tool, record) = fake_ai_tool(&temp, "claude");
+    // 即便有可用的 AI 工具，也不应被调用
+    let (tool, called) = fake_ai_tool(temp.path(), "claude", "TAG-NONE");
     cmd.env("GG_AI_BIN", &tool);
     cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
 
@@ -686,63 +688,59 @@ fn ai_provider_none_disables_fallback() {
         .stderr(predicate::str::contains("AI 回退已关闭"));
 
     assert!(
-        !record.exists(),
+        !called.exists(),
         "ai_provider = none 时不应调用任何 AI 工具"
     );
 }
 
 /// `ai_command` 优先级高于 `ai_provider` 预设，包括 none。
+///
+/// 参数拼接（`--flag` 是否透传、提示词追加在末尾）是纯函数逻辑，由
+/// `config::tests` 与 `ai::tests` 覆盖；这里只验证「选中的是这个后端」。
 #[test]
 fn custom_ai_command_takes_precedence_over_preset() {
     let temp = TempDir::new().expect("tempdir");
     let notes_dir = temp.path().join("notes");
     fs::create_dir_all(&notes_dir).expect("创建笔记目录");
-    let (tool, record) = fake_ai_tool(&temp, "mytool");
+    let (tool, called) = fake_ai_tool(temp.path(), "mytool", "TAG-CUSTOM");
 
     write_config(
         &temp,
         &format!(
-            "language = \"zh\"\nai_provider = \"none\"\nai_command = \"{} --flag\"\nask_before_ai = false\nauto_save_ai = false\n",
+            // 用 TOML 字面量字符串（单引号）：Windows 路径里的反斜杠在基本
+            // 字符串里会被当成转义序列（`\U` 会被解析为 unicode 转义而报错）
+            "language = \"zh\"\nai_provider = \"none\"\nai_command = '{} --flag'\nask_before_ai = false\nauto_save_ai = false\n",
             tool.display()
         ),
     );
 
     let mut cmd = command_for(&temp);
     cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
-    cmd.assert().success();
 
-    let argv = read_record(&record);
-    assert!(
-        argv.contains("--flag"),
-        "自定义命令的参数应被传递，实际 argv:\n{argv}"
-    );
-    // 提示词作为最后一个参数追加，且必须是优化后的新提示词
-    assert!(
-        argv.contains("10~25"),
-        "应使用简洁版提示词，实际 argv:\n{argv}"
-    );
-    assert!(
-        argv.contains("foo"),
-        "提示词应指明目标命令，实际 argv:\n{argv}"
-    );
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("TAG-CUSTOM"));
+
+    assert!(called.exists(), "自定义命令应被调用");
 }
 
-/// 预设 provider 应当拼出各自的非交互调用形式。
+/// 各预设应当调用各自的可执行文件。
 #[test]
-fn provider_presets_use_their_own_arguments() {
-    for (provider, bin_name, expected_arg) in [
-        ("claude", "claude", "--output-format"),
-        ("codex", "codex", "exec"),
-        ("gemini", "gemini", "-p"),
+fn provider_presets_invoke_their_own_binary() {
+    for (provider, bin_name) in [
+        ("claude", "claude"),
+        ("codex", "codex"),
+        ("gemini", "gemini"),
     ] {
         let temp = TempDir::new().expect("tempdir");
         let notes_dir = temp.path().join("notes");
         fs::create_dir_all(&notes_dir).expect("创建笔记目录");
         let bin_dir = temp.path().join("bin");
-        fs::create_dir_all(&bin_dir).expect("创建 bin 目录");
+        let tag = format!("TAG-{}", provider.to_uppercase());
 
-        let (tool, record) = fake_ai_tool(&temp, bin_name);
-        fs::rename(&tool, bin_dir.join(bin_name)).expect("移动假工具到 bin");
+        // 直接写进 bin 目录：原先先写到临时目录再 rename，Windows 上会把
+        // `.cmd` 扩展名弄丢，`which` 就找不到这个「可执行文件」了
+        let (tool, called) = fake_ai_tool(&bin_dir, bin_name, &tag);
 
         write_config(
             &temp,
@@ -754,23 +752,23 @@ fn provider_presets_use_their_own_arguments() {
         let mut cmd = command_for(&temp);
         prepend_path(&mut cmd, &bin_dir);
         cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
-        cmd.assert().success();
 
-        let argv = read_record(&record);
-        assert!(
-            argv.contains(expected_arg),
-            "{provider} 预设应包含 `{expected_arg}`，实际 argv:\n{argv}"
-        );
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains(&tag));
+
+        assert!(called.exists(), "{provider} 预设应调用 {bin_name}");
+        assert!(tool.exists(), "夹具应写在 bin 目录里");
     }
 }
 
-/// `GG_AI_BIN` 只替换可执行文件，保留预设参数。
+/// `GG_AI_BIN` 只替换可执行文件（预置参数由 `config` 单测覆盖）。
 #[test]
 fn gg_ai_bin_overrides_preset_binary_only() {
     let temp = TempDir::new().expect("tempdir");
     let notes_dir = temp.path().join("notes");
     fs::create_dir_all(&notes_dir).expect("创建笔记目录");
-    let (tool, record) = fake_ai_tool(&temp, "claude");
+    let (tool, called) = fake_ai_tool(temp.path(), "custom-claude", "TAG-CUSTOM-BIN");
 
     write_config(
         &temp,
@@ -780,13 +778,12 @@ fn gg_ai_bin_overrides_preset_binary_only() {
     let mut cmd = command_for(&temp);
     cmd.env("GG_AI_BIN", &tool);
     cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
-    cmd.assert().success();
 
-    let argv = read_record(&record);
-    assert!(
-        argv.contains("--output-format"),
-        "GG_AI_BIN 只该换二进制，预设参数应保留，实际 argv:\n{argv}"
-    );
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("TAG-CUSTOM-BIN"));
+
+    assert!(called.exists(), "应调用 GG_AI_BIN 指定的可执行文件");
 }
 
 /// 非终端（管道）下不显示转圈，但必须有静态提示，否则用户会以为卡死。

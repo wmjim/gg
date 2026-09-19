@@ -134,6 +134,11 @@ impl AppConfig {
     /// 优先级：`ai_command` > `GG_AI_BIN`（`GG_CLAUDE_BIN` 为兼容旧版保留）>
     /// `ai_provider` 预设。`GG_AI_BIN` 只替换可执行文件，保留预设参数。
     pub fn ai_invocation(&self) -> AiInvocation {
+        self.ai_invocation_from(ai_bin_override())
+    }
+
+    /// [`Self::ai_invocation`] 的可注入版本；参数化是为了脱离进程环境测试。
+    fn ai_invocation_from(&self, bin_override: Option<String>) -> AiInvocation {
         if let Some(custom) = self
             .ai_command
             .as_deref()
@@ -147,7 +152,7 @@ impl AppConfig {
             return AiInvocation::Disabled;
         };
 
-        let bin = ai_bin_override().unwrap_or_else(|| bin.to_string());
+        let bin = bin_override.unwrap_or_else(|| bin.to_string());
         AiInvocation::Command(format!("{bin} {preset_args}"))
     }
 
@@ -325,6 +330,63 @@ language = "zh"
         let cfg: AppConfig = toml::from_str("editor = \"   \"").expect("合法配置");
         assert_eq!(cfg.editor_spec(), None);
         assert!(cfg.editor.is_some());
+    }
+
+    /// 预设表、`GG_AI_BIN` 覆盖、自定义命令与关闭，全部在这里用纯数据覆盖。
+    ///
+    /// 放在单测而不是集成测试里：集成测试只能靠假工具「录制自己的 argv」来
+    /// 观察参数，而 Windows 上经 cmd 传递多行提示词时那段批处理写法本身就
+    /// 不可靠（提示词含换行，`echo %*` 会被截断）。拼接逻辑是纯函数，直接测。
+    #[test]
+    fn ai_invocation_builds_the_expected_command_line() {
+        let with_provider = |provider| AppConfig {
+            ai_provider: provider,
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            with_provider(AiProvider::Claude).ai_invocation_from(None),
+            AiInvocation::Command("claude -p --output-format text".to_string())
+        );
+        assert_eq!(
+            with_provider(AiProvider::Codex).ai_invocation_from(None),
+            AiInvocation::Command("codex exec".to_string())
+        );
+        assert_eq!(
+            with_provider(AiProvider::Gemini).ai_invocation_from(None),
+            AiInvocation::Command("gemini -p".to_string())
+        );
+        assert_eq!(
+            with_provider(AiProvider::None).ai_invocation_from(None),
+            AiInvocation::Disabled
+        );
+
+        // GG_AI_BIN 只换可执行文件，预设参数保留
+        assert_eq!(
+            with_provider(AiProvider::Claude).ai_invocation_from(Some("/opt/claude".to_string())),
+            AiInvocation::Command("/opt/claude -p --output-format text".to_string())
+        );
+
+        // ai_command 优先级最高，连 none 也压得住
+        let custom = AppConfig {
+            ai_provider: AiProvider::None,
+            ai_command: Some("llm -m gpt-4o".to_string()),
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            custom.ai_invocation_from(None),
+            AiInvocation::Command("llm -m gpt-4o".to_string())
+        );
+
+        // 空白的 ai_command 视为未设置
+        let blank = AppConfig {
+            ai_command: Some("   ".to_string()),
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            blank.ai_invocation_from(None),
+            AiInvocation::Command("claude -p --output-format text".to_string())
+        );
     }
 
     #[test]
