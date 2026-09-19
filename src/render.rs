@@ -240,10 +240,29 @@ fn markdown_to_html_body(markdown: &str) -> String {
     options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
 
-    let events: Vec<Event> = Parser::new_ext(markdown, options).collect();
+    // 原始 HTML 必须在代码块高亮**之前**降级为纯文本：highlight_code_blocks
+    // 会把自己产出的、可信的 `Event::Html` 塞进事件流，顺序反了会连它们
+    // 一起转义掉。
+    let events: Vec<Event> = Parser::new_ext(markdown, options)
+        .map(escape_raw_html)
+        .collect();
     let mut html_output = String::new();
     html::push_html(&mut html_output, highlight_code_blocks(events).into_iter());
     html_output
+}
+
+/// 把笔记里的原始 HTML 降级为纯文本。
+///
+/// pulldown-cmark 遵循 CommonMark，会原样透传 HTML 块与行内标签。产物是写进
+/// 文件、再用浏览器打开的 `.html`，所以笔记里的 `<script>` 或 `onerror=`
+/// 会在 `file://` 源上执行 —— 而 AI 生成的笔记属于不可信输入，必须一并挡住。
+/// 转成 `Event::Text` 后由 `push_html` 统一转义；代价是原始 HTML 以字面量
+/// 显示，这与语法高亮「宁可少着色，也不出错色」是同一种取舍。
+fn escape_raw_html(event: Event<'_>) -> Event<'_> {
+    match event {
+        Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
+        other => other,
+    }
 }
 
 /// 把代码块事件替换成带高亮 span 的 HTML。
@@ -341,6 +360,33 @@ mod tests {
         let html = render_html_for_test("# hi\n\n`<b>`\n");
         assert!(html.contains("<h1>hi</h1>"));
         assert!(html.contains("&lt;b&gt;"));
+    }
+
+    /// `gg -b` 的产物会被浏览器当成页面执行：笔记里的原始 HTML 必须降级为
+    /// 纯文本，否则 `<script>` / `onerror=` 会在 file:// 源上跑起来。
+    /// AI 生成的内容属于不可信输入，回归时不要把这条守卫删掉。
+    #[test]
+    fn raw_html_in_notes_is_escaped_instead_of_executed() {
+        let markdown = "\
+<script>document.title = 'pwned'</script>\n\
+\n\
+<img src=x onerror=\"document.title='pwned'\">\n\
+\n\
+行内 <b>粗体</b> 与 <a href=\"javascript:alert(1)\">链接</a>\n";
+
+        let html = render_html_for_test(markdown);
+
+        for raw in ["<script", "<img", "<b>", "<a href"] {
+            assert!(!html.contains(raw), "原始标签 `{raw}` 被透传:\n{html}");
+        }
+        assert!(
+            html.contains("&lt;script&gt;"),
+            "原始 HTML 应转义为纯文本:\n{html}"
+        );
+        assert!(
+            html.contains("&lt;b&gt;粗体&lt;/b&gt;"),
+            "行内 HTML 应转义为纯文本:\n{html}"
+        );
     }
 
     #[test]

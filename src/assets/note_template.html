@@ -4,6 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="dark light">
+    <!-- 笔记内容（尤其是 AI 生成的）是不可信输入。渲染层已把原始 HTML 降级为
+         纯文本，这里再加一层 CSP 兜底，顺带挡住 markdown 链接里的 javascript:
+         等脚本路径。img-src 放宽到 data/http/https，避免笔记里的配图被拦掉。 -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; style-src 'unsafe-inline'; img-src data: https: http:">
     <title>{{command}} · gg</title>
     <style>
         /* 颜色只在下面两个主题块里定义：任何规则内的字面量颜色都是 bug，
