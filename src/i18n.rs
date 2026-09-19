@@ -122,6 +122,26 @@ impl Language {
             zh: "有 {count} 个条目无法读取，已跳过（用 GG_DEBUG=1 查看详情）。",
             en: "{count} entries could not be read and were skipped (set GG_DEBUG=1 for details).",
         },
+        note_removed(path: &str) => {
+            zh: "已删除笔记: {path}",
+            en: "Note removed: {path}",
+        },
+        ask_remove_note(commands: &str) => {
+            zh: "删除命令 `{commands}` 的笔记？",
+            en: "Delete the notes for `{commands}`?",
+        },
+        remove_cancelled() => {
+            zh: "已取消删除。",
+            en: "Removal cancelled.",
+        },
+        remove_needs_confirmation() => {
+            zh: "非交互终端：删除不可逆，已跳过（请在交互终端执行，或加 --yes 明确授权）。",
+            en: "Non-interactive terminal: removal is irreversible and was skipped (run interactively, or pass --yes).",
+        },
+        remove_hint_git(repo: &str) => {
+            zh: "提示: {repo} 是 git 仓库，可用 `git -C {repo} restore <文件>` 找回。",
+            en: "Hint: {repo} is a git repository; recover with `git -C {repo} restore <file>`.",
+        },
         save_skipped() => {
             zh: "已跳过保存。",
             en: "Save skipped.",
@@ -277,6 +297,22 @@ impl Language {
         cli_arg_version() => {
             zh: "打印版本",
             en: "Print version",
+        },
+        cli_cmd_rm() => {
+            zh: "删除指定命令的笔记（不可逆，会先确认）",
+            en: "Delete the notes for the given commands (irreversible; asks first)",
+        },
+        cli_cmd_rm_command() => {
+            zh: "要删除的命令名，可给多个",
+            en: "Command name(s) to delete; more than one is allowed",
+        },
+        cli_cmd_show() => {
+            zh: "查询指定命令的笔记（用于被同名子命令占用的命令名，如 rm）",
+            en: "Show the note for a command (for names shadowed by subcommands, e.g. rm)",
+        },
+        cli_cmd_show_command() => {
+            zh: "命令名",
+            en: "Command name",
         },
         cli_cmd_list() => {
             zh: "列出所有笔记命令",

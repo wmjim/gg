@@ -504,6 +504,199 @@ fn unsaved_generated_note_is_still_printed() {
     assert!(!notes_dir.join("foo.md").exists());
 }
 
+// ---------------------------------------------------------------- 删除笔记
+
+#[test]
+fn rm_with_yes_deletes_the_note() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+    write_note(&notes_dir, "grep", "# grep\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "-y",
+        "rm",
+        "ls",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("已删除笔记"));
+
+    assert!(!notes_dir.join("ls.md").exists(), "指定笔记应被删除");
+    assert!(notes_dir.join("grep.md").exists(), "其它笔记不应受影响");
+}
+
+/// 删除不可逆：管道场景没有用户确认，必须拒绝执行。
+#[test]
+fn rm_without_yes_refuses_in_a_pipe_and_keeps_the_file() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "rm", "ls"]);
+
+    cmd.assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("非交互终端"));
+
+    assert!(notes_dir.join("ls.md").exists(), "未确认时不得删除");
+}
+
+#[test]
+fn rm_reports_missing_note_with_exit_code_3() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "-y",
+        "rm",
+        "nope",
+    ]);
+
+    cmd.assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("未找到命令 `nope`"));
+}
+
+/// 缺参数必须是用法错误，绝不能退化成「删掉某个默认目标」。
+#[test]
+fn rm_without_arguments_is_a_usage_error() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut cmd = command_for(&temp);
+    cmd.args(["rm"]);
+
+    cmd.assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("COMMAND"));
+}
+
+#[test]
+fn rm_rejects_path_traversal() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "-y",
+        "rm",
+        "../etc/passwd",
+    ]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported path characters"));
+    assert!(notes_dir.join("ls.md").exists());
+}
+
+#[test]
+fn rm_help_is_localized() {
+    for (lang, expected) in [
+        ("zh", "删除指定命令的笔记"),
+        ("en", "Delete the notes for the given commands"),
+    ] {
+        let mut cmd = command_for(&TempDir::new().expect("tempdir"));
+        cmd.args(["--lang", lang, "rm", "--help"]);
+        cmd.assert()
+            .success()
+            .stdout(predicate::str::contains(expected))
+            .stdout(predicate::str::contains("COMMAND"));
+    }
+}
+
+/// `rm` 变成子命令后，与它同名的笔记必须仍有办法读到。
+#[test]
+fn show_reaches_a_note_shadowed_by_a_subcommand() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "rm", "# rm\n删除文件\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "show",
+        "rm",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("删除文件"));
+}
+
+/// `show` 走的是正常查询路径，因此 --browser / --edit 也应照常生效。
+#[test]
+fn show_supports_the_edit_flag() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "rm", "# rm\n");
+
+    let editor = temp.path().join("noop-editor");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(&editor, "#!/bin/sh\nexit 0\n").expect("写假编辑器");
+        let mut perms = fs::metadata(&editor).expect("stat").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&editor, perms).expect("chmod");
+    }
+    #[cfg(windows)]
+    {
+        fs::write(&editor, "@echo off\r\nexit /b 0\r\n").expect("写假编辑器");
+    }
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_EDITOR", &editor);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "--edit",
+        "show",
+        "rm",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("已新建空笔记").not());
+}
+
+/// 删除提示里应给出 git 找回方式（笔记目录位于仓库内时）。
+#[test]
+fn rm_hints_at_git_recovery_when_available() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+    fs::create_dir_all(temp.path().join(".git")).expect("造一个假 git 仓库");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "-y",
+        "rm",
+        "ls",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("git"));
+}
+
 // ---------------------------------------------------------------- AI 后端选择
 
 #[test]

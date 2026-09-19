@@ -31,6 +31,18 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     List,
+    /// Delete the notes for the given commands
+    Rm {
+        // 必须 required：否则 `gg rm` 会静默变成「什么都没删」的退出码 3，
+        // 而不是用法错误 —— 对删除命令来说这种静默最危险。
+        #[arg(value_name = "COMMAND", num_args = 1.., required = true)]
+        commands: Vec<String>,
+    },
+    /// Show the note for a command (escape hatch for shadowed names)
+    Show {
+        #[arg(value_name = "COMMAND")]
+        command: String,
+    },
     Search {
         #[arg(value_name = "KEYWORD")]
         keyword: String,
@@ -48,6 +60,7 @@ pub enum Action {
     Query(String),
     List,
     Search { keyword: String, content: bool },
+    Remove(Vec<String>),
     None,
 }
 
@@ -66,6 +79,11 @@ impl Cli {
     pub fn into_parts(self) -> CliParts {
         let action = match self.command {
             Some(Commands::List) => Action::List,
+            Some(Commands::Rm { commands }) => Action::Remove(commands),
+            // `show` 只是解析层的逃生口：被同名子命令占用的命令名（如 rm）
+            // 仍能查询。落到查询路径后与直接 `gg <cmd>` 完全一致，
+            // 因此 --browser / --edit 照样生效。
+            Some(Commands::Show { command }) => Action::Query(command),
             Some(Commands::Search { keyword, content }) => Action::Search { keyword, content },
             Some(Commands::Query(args)) => Action::Query(args.join(" ")),
             None => Action::None,
@@ -150,6 +168,22 @@ pub fn command(lang: Language) -> Command {
             sub.about(lang.cli_cmd_list())
                 .help_template(headings.template())
         })
+        .mut_subcommand("rm", |sub| {
+            sub.about(lang.cli_cmd_rm())
+                .help_template(headings.template())
+                .mut_arg("commands", |arg| {
+                    arg.help(lang.cli_cmd_rm_command())
+                        .help_heading(headings.arguments)
+                })
+        })
+        .mut_subcommand("show", |sub| {
+            sub.about(lang.cli_cmd_show())
+                .help_template(headings.template())
+                .mut_arg("command", |arg| {
+                    arg.help(lang.cli_cmd_show_command())
+                        .help_heading(headings.arguments)
+                })
+        })
         .mut_subcommand("search", |sub| {
             sub.about(lang.cli_cmd_search())
                 .help_template(headings.template())
@@ -176,7 +210,7 @@ pub fn command(lang: Language) -> Command {
         })
         .mut_subcommand("help", |sub| sub.about(lang.cli_cmd_help()));
 
-    for name in ["list", "search"] {
+    for name in ["list", "search", "rm", "show"] {
         cmd = cmd.mut_subcommand(name, |sub| {
             sub.mut_arg("help", |arg| {
                 arg.help(lang.cli_arg_help()).help_heading(headings.options)

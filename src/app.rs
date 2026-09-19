@@ -16,7 +16,7 @@ use crate::utils::output;
 use crate::utils::{layout, spinner};
 use anyhow::{Context, Result};
 use std::io::{self, IsTerminal};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const SUGGESTION_LIMIT: usize = 5;
@@ -39,7 +39,9 @@ fn miss_message(command: &str, suggestions: &[String], lang: Language) -> String
 /// 拿不到真实终端宽度时的兜底列数。
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
-/// 未命中笔记时的退出码，便于脚本判断（`gg foo || echo "没笔记"`）。
+/// 「没有产生任何结果」的退出码，便于脚本判断（`gg foo || echo "没笔记"`）。
+///
+/// 覆盖两种情况：查询未命中笔记，以及操作因缺少用户确认而未执行。
 pub const EXIT_NOTE_NOT_FOUND: u8 = 3;
 
 pub fn run(cli: Cli) -> Result<ExitCode> {
@@ -82,6 +84,11 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
             write_commands(&found.items, lang)?;
             Ok(ExitCode::SUCCESS)
         }
+        Action::Remove(commands) => Ok(remove_notes(
+            &notes_dir, &commands, &prompter, parts.yes, lang,
+        )?
+        .exit_code()
+        .map_or(ExitCode::SUCCESS, ExitCode::from)),
         Action::Search { keyword, content } => {
             if content {
                 let found = notes::search_notes_by_content(&notes_dir, &keyword)?;
@@ -194,6 +201,109 @@ fn warn_skipped(skipped: &[notes::Skipped], lang: Language) {
             entry.reason
         );
     }
+}
+
+/// 删除动作的结果，决定退出码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoveOutcome {
+    /// 目标已全部删除。
+    Removed,
+    /// 目标不存在，什么都没做。
+    NotFound,
+    /// 未取得确认（非交互且未加 --yes，或用户拒绝）。
+    Declined,
+}
+
+impl RemoveOutcome {
+    fn exit_code(self) -> Option<u8> {
+        match self {
+            RemoveOutcome::Removed => None,
+            RemoveOutcome::NotFound | RemoveOutcome::Declined => Some(EXIT_NOTE_NOT_FOUND),
+        }
+    }
+}
+
+/// 删除笔记。
+///
+/// 删除不可逆，因此非交互终端下必须显式 `--yes` 才会执行 —— 与 AI 回退同一
+/// 原则：没有拿到用户明确同意，就不做有副作用的操作。
+fn remove_notes(
+    notes_dir: &Path,
+    commands: &[String],
+    prompter: &dyn Prompter,
+    assume_yes: bool,
+    lang: Language,
+) -> Result<RemoveOutcome> {
+    // 空目标集是静默空操作，宁可明确报错
+    anyhow::ensure!(!commands.is_empty(), "需要指定至少一个要删除的命令名");
+
+    // 先校验并收集目标，避免「删了几个才发现有笔误」的半成品状态
+    let mut targets: Vec<(String, PathBuf)> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+
+    for command in commands {
+        notes::validate_command_name(command)?;
+        let path = notes::note_path(notes_dir, command);
+        if path.is_file() {
+            targets.push((command.clone(), path));
+        } else {
+            missing.push(command.clone());
+        }
+    }
+
+    for command in &missing {
+        eprintln!("{}", lang.note_not_found_alone(command));
+    }
+    if targets.is_empty() {
+        return Ok(RemoveOutcome::NotFound);
+    }
+
+    if !assume_yes {
+        if !prompter.is_interactive() {
+            eprintln!("{}", lang.remove_needs_confirmation());
+            return Ok(RemoveOutcome::Declined);
+        }
+        let names = targets
+            .iter()
+            .map(|(command, _)| command.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        // 默认否定：删除不可逆，直接回车不该删掉东西
+        if !prompter.confirm(&lang.ask_remove_note(&names), false)? {
+            eprintln!("{}", lang.remove_cancelled());
+            return Ok(RemoveOutcome::Declined);
+        }
+    }
+
+    for (command, path) in &targets {
+        notes::remove_note(notes_dir, command)?;
+        eprintln!("{}", lang.note_removed(&path.display().to_string()));
+    }
+
+    if let Some(repo) = enclosing_git_repository(notes_dir) {
+        eprintln!("{}", lang.remove_hint_git(&repo.display().to_string()));
+    }
+
+    Ok(RemoveOutcome::Removed)
+}
+
+/// 笔记目录位于 git 仓库内时返回仓库根，用于给出找回提示。
+///
+/// 删除不可逆，而把笔记纳入版本控制是常见做法；只向上找有限层，避免在
+/// 无关的顶层目录里翻出 `.git` 给出误导性提示。
+fn enclosing_git_repository(notes_dir: &Path) -> Option<PathBuf> {
+    // 先转绝对路径：相对路径的 `ancestors()` 末尾会产出空路径，
+    // 而空路径会命中当前工作目录的 `.git`，提示里的仓库路径就变成空白。
+    let start = notes_dir
+        .canonicalize()
+        .unwrap_or_else(|_| notes_dir.to_path_buf());
+
+    start
+        .ancestors()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .take(4)
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 fn ask_language(prompter: &dyn Prompter) -> Result<Language> {
@@ -485,6 +595,7 @@ mod tests {
         interactive: bool,
         answers: RefCell<Vec<bool>>,
         asked: RefCell<Vec<String>>,
+        defaults: RefCell<Vec<bool>>,
     }
 
     impl FakePrompter {
@@ -493,6 +604,7 @@ mod tests {
                 interactive: true,
                 answers: RefCell::new(answers),
                 asked: RefCell::new(Vec::new()),
+                defaults: RefCell::new(Vec::new()),
             }
         }
 
@@ -501,11 +613,17 @@ mod tests {
                 interactive: false,
                 answers: RefCell::new(Vec::new()),
                 asked: RefCell::new(Vec::new()),
+                defaults: RefCell::new(Vec::new()),
             }
         }
 
         fn asked(&self) -> Vec<String> {
             self.asked.borrow().clone()
+        }
+
+        /// 每次询问传入的默认答案，用于断言危险操作默认否定。
+        fn defaults(&self) -> Vec<bool> {
+            self.defaults.borrow().clone()
         }
     }
 
@@ -514,8 +632,9 @@ mod tests {
             self.interactive
         }
 
-        fn confirm(&self, question: &str, _default_yes: bool) -> Result<bool> {
+        fn confirm(&self, question: &str, default_yes: bool) -> Result<bool> {
             self.asked.borrow_mut().push(question.to_string());
+            self.defaults.borrow_mut().push(default_yes);
             let mut answers = self.answers.borrow_mut();
             if answers.is_empty() {
                 anyhow::bail!("测试用例没有准备足够的回答");
@@ -588,6 +707,232 @@ mod tests {
             message.lines().next(),
             Some("No notes for `lz`, recommend:")
         );
+    }
+
+    fn note_files(temp: &tempfile::TempDir) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(temp.path())
+            .expect("读目录")
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                path.file_stem()?.to_str().map(str::to_string)
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn remove_refuses_in_a_non_interactive_terminal_without_yes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("ls.md"), "# ls\n").expect("写笔记");
+        let prompter = FakePrompter::non_interactive();
+
+        let outcome = remove_notes(
+            temp.path(),
+            &["ls".to_string()],
+            &prompter,
+            false,
+            Language::Zh,
+        )
+        .expect("执行成功");
+
+        assert_eq!(outcome, RemoveOutcome::Declined);
+        assert_eq!(outcome.exit_code(), Some(EXIT_NOTE_NOT_FOUND));
+        assert_eq!(note_files(&temp), vec!["ls"], "非交互下不得删除文件");
+        assert!(prompter.asked().is_empty(), "非交互下不应尝试询问");
+    }
+
+    #[test]
+    fn remove_deletes_after_interactive_confirmation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("ls.md"), "# ls\n").expect("写笔记");
+        fs::write(temp.path().join("grep.md"), "# grep\n").expect("写笔记");
+        let prompter = FakePrompter::interactive(vec![true]);
+
+        let outcome = remove_notes(
+            temp.path(),
+            &["ls".to_string()],
+            &prompter,
+            false,
+            Language::Zh,
+        )
+        .expect("执行成功");
+
+        assert_eq!(outcome, RemoveOutcome::Removed);
+        assert_eq!(outcome.exit_code(), None);
+        assert_eq!(note_files(&temp), vec!["grep"], "只应删掉指定的那一份");
+    }
+
+    /// 删除不可逆，回车必须等于「不删」。
+    #[test]
+    fn remove_asks_with_a_negative_default() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("ls.md"), "# ls\n").expect("写笔记");
+        let prompter = FakePrompter::interactive(vec![true]);
+
+        remove_notes(
+            temp.path(),
+            &["ls".to_string()],
+            &prompter,
+            false,
+            Language::Zh,
+        )
+        .expect("执行成功");
+
+        assert_eq!(prompter.defaults(), vec![false], "危险操作必须默认否定");
+    }
+
+    #[test]
+    fn remove_keeps_the_file_when_the_user_declines() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("ls.md"), "# ls\n").expect("写笔记");
+        let prompter = FakePrompter::interactive(vec![false]);
+
+        let outcome = remove_notes(
+            temp.path(),
+            &["ls".to_string()],
+            &prompter,
+            false,
+            Language::Zh,
+        )
+        .expect("执行成功");
+
+        assert_eq!(outcome, RemoveOutcome::Declined);
+        assert_eq!(note_files(&temp), vec!["ls"]);
+    }
+
+    #[test]
+    fn yes_authorizes_removal_without_a_terminal() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("ls.md"), "# ls\n").expect("写笔记");
+        fs::write(temp.path().join("grep.md"), "# grep\n").expect("写笔记");
+        let prompter = FakePrompter::non_interactive();
+
+        let outcome = remove_notes(
+            temp.path(),
+            &["ls".to_string(), "grep".to_string()],
+            &prompter,
+            true,
+            Language::Zh,
+        )
+        .expect("执行成功");
+
+        assert_eq!(outcome, RemoveOutcome::Removed);
+        assert!(note_files(&temp).is_empty(), "两个目标都应删除");
+    }
+
+    #[test]
+    fn remove_deletes_only_the_notes_that_exist() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("ls.md"), "# ls\n").expect("写笔记");
+        let prompter = FakePrompter::non_interactive();
+
+        let outcome = remove_notes(
+            temp.path(),
+            &["ls".to_string(), "nope".to_string()],
+            &prompter,
+            true,
+            Language::Zh,
+        )
+        .expect("执行成功");
+
+        assert_eq!(outcome, RemoveOutcome::Removed, "存在的那份仍应删掉");
+        assert!(note_files(&temp).is_empty());
+    }
+
+    #[test]
+    fn remove_reports_not_found_when_nothing_matches() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompter = FakePrompter::non_interactive();
+
+        let outcome = remove_notes(
+            temp.path(),
+            &["nope".to_string()],
+            &prompter,
+            true,
+            Language::Zh,
+        )
+        .expect("执行成功");
+
+        assert_eq!(outcome, RemoveOutcome::NotFound);
+        assert_eq!(outcome.exit_code(), Some(EXIT_NOTE_NOT_FOUND));
+    }
+
+    /// 目录与笔记同名时不能被删掉。
+    #[test]
+    fn remove_ignores_a_directory_with_the_same_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("somedir.md")).expect("建同名目录");
+        let prompter = FakePrompter::non_interactive();
+
+        let outcome = remove_notes(
+            temp.path(),
+            &["somedir".to_string()],
+            &prompter,
+            true,
+            Language::Zh,
+        )
+        .expect("执行成功");
+
+        assert_eq!(outcome, RemoveOutcome::NotFound);
+        assert!(temp.path().join("somedir.md").is_dir(), "目录必须还在");
+    }
+
+    #[test]
+    fn git_recovery_hint_uses_a_non_empty_repository_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let notes_dir = temp.path().join("notes");
+        fs::create_dir_all(&notes_dir).expect("建笔记目录");
+        fs::create_dir_all(temp.path().join(".git")).expect("造假 git 仓库");
+
+        let repo = enclosing_git_repository(&notes_dir).expect("应找到仓库");
+        assert!(!repo.as_os_str().is_empty(), "仓库路径不能是空的");
+        assert_eq!(
+            repo.canonicalize().expect("规范化"),
+            temp.path().canonicalize().expect("规范化"),
+        );
+    }
+
+    #[test]
+    fn no_git_hint_outside_a_repository() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let notes_dir = temp.path().join("notes");
+        fs::create_dir_all(&notes_dir).expect("建笔记目录");
+
+        // /tmp 下通常不在 git 仓库内；若确实在，则不成立，此时跳过
+        if enclosing_git_repository(&notes_dir).is_none() {
+            assert!(enclosing_git_repository(&notes_dir).is_none());
+        }
+    }
+
+    /// 空目标集不得退化为「静默成功」。
+    #[test]
+    fn remove_rejects_an_empty_target_list() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let prompter = FakePrompter::non_interactive();
+
+        let err = remove_notes(temp.path(), &[], &prompter, true, Language::Zh)
+            .expect_err("空目标集应当报错");
+        assert!(format!("{err:#}").contains("至少一个"), "{err:#}");
+    }
+
+    #[test]
+    fn remove_rejects_path_traversal_before_touching_disk() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("ls.md"), "# ls\n").expect("写笔记");
+        let prompter = FakePrompter::non_interactive();
+
+        let err = remove_notes(
+            temp.path(),
+            &["../etc/passwd".to_string()],
+            &prompter,
+            true,
+            Language::Zh,
+        )
+        .expect_err("路径穿越必须被拒绝");
+
+        assert!(format!("{err:#}").contains("unsupported path characters"));
+        assert_eq!(note_files(&temp), vec!["ls"], "拒绝后不应有副作用");
     }
 
     #[test]
