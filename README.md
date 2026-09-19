@@ -12,7 +12,8 @@
 
 - 查询：`gg <cmd>`
 - 列表：`gg list`
-- 搜索：`gg search <keyword>`（仅按文件名匹配）
+- 搜索：`gg search <keyword>`（默认按文件名）
+- 全文搜索：`gg search -c <keyword>`（按笔记正文，grep 风格输出）
 - 路径优先级：`--notes-dir` > `GG_NOTES_DIR` > 系统配置目录下 `gg/notes`
 - Markdown 渲染：优先调用 `glow`，失败时回退原始 Markdown 输出
 - AI 回退：未命中时检测 `claude`，可询问后生成并保存
@@ -106,6 +107,13 @@ notes/
 gg ls
 gg list
 gg search gre
+gg search -c 递归        # 按正文搜索，输出 `文件:行号: 内容`
+```
+
+```text
+$ gg search -c 递归
+grep:12: 递归搜索目录下所有文件
+grep:13: 递归时要小心软链接
 ```
 
 ## 退出码
@@ -134,6 +142,7 @@ auto_save_ai = true       # AI 生成后是否落盘
 ask_before_save = false   # 落盘前是否再询问一次
 ai_note_language = "zh-CN"
 ai_provider = "claude"    # 当前仅支持 claude
+ai_timeout_seconds = 180  # AI 生成最长等待秒数，0 表示不限制
 editor = "hx"             # 可选：默认编辑器，支持带参数，如 "code -w"
 language = "zh"           # 可选：显示语言 (zh/en)
 ```
@@ -152,6 +161,10 @@ language = "zh"           # 可选：显示语言 (zh/en)
 5. 根据保存策略保存到 `<notes_dir>/<cmd>.md`
 
 可通过 `GG_CLAUDE_BIN` 指定 Claude 可执行文件路径。
+
+生成期间会在 `stderr` 输出进度提示；超过 `ai_timeout_seconds` 仍未返回时
+会终止子进程并报错（默认 180 秒）。`claude --version` 的可用性探测则固定
+5 秒超时，避免首次运行的登录提示或网络阻塞把 `gg` 拖住。
 
 ### 非交互终端的保护策略
 
@@ -198,6 +211,22 @@ gg --edit ls
 编辑器优先级：`config.editor` > `GG_EDITOR` > `VISUAL` > `EDITOR` > 终端编辑器
 （`nvim` > `vim` > `vi` > `hx` > `helix` > `nano`）> 系统默认程序。
 
+这是一条**严格优先级链**：上一级只是「没装」时会继续往下试，而不是直接跳到
+终端编辑器。但如果上一级**装上了却以非 0 退出**（例如 vim 里 `:cq`），
+`gg` 会直接报错并保留退出码，不会再开第二个编辑器：
+
+```text
+$ gg --edit ls
+Error: 编辑器 `failing` 执行失败，未回退到其他编辑器: 编辑器退出码 4
+```
+
+`--edit` 一个尚未存在的命令时会新建空笔记并明确提示，不会默默多出文件：
+
+```text
+$ gg --edit docker
+已新建空笔记: ~/.config/gg/notes/docker.md
+```
+
 可用 `--set-editor` 设置默认编辑器并保存到配置：
 
 ```bash
@@ -214,6 +243,8 @@ gg --lang en
 ```
 
 `gg --lang en --help` 会立即以英文输出帮助，无需先落盘配置。
+根命令与所有子命令的帮助（`用法/命令/参数/选项` 标题、参数说明、帮助正文）
+均由 clap 的单一来源生成并本地化。
 
 ## 排查问题
 
@@ -273,6 +304,8 @@ CI（`.github/workflows/ci.yml`）在 ubuntu / macos / windows 三个平台跑�
 - 命令名不能包含 `/`、`\`、`:`
 - 仅支持 `.md` 笔记文件
 - `list`、`search`、`help` 是子命令名，不能作为普通查询命令名直接使用
+- `search` 默认只匹配文件名，需要搜索正文请加 `-c/--content`
+- `search -c` 是纯子串匹配，不做 Markdown 语法剥离，行为可预测
 
 ## License
 
