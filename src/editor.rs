@@ -23,6 +23,15 @@ enum EditorFailure {
     RunFailed(anyhow::Error),
 }
 
+impl std::fmt::Display for EditorFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EditorFailure::NotInstalled(err) => write!(formatter, "编辑器未安装: {err:#}"),
+            EditorFailure::RunFailed(err) => write!(formatter, "{err:#}"),
+        }
+    }
+}
+
 pub struct SystemEditor {
     /// `config.editor`，优先级最高。
     configured: Option<String>,
@@ -197,6 +206,49 @@ mod tests {
         note
     }
 
+    /// 并行测试下其它线程 fork 时可能短暂继承脚本的写 fd，
+    /// 导致 exec 得到 ETXTBSY（Text file busy）。
+    /// 这是测试环境的竞态（并行用例会 fork 出 `sleep` 等进程），
+    /// 不是被测代码的问题，退避重试即可。
+    #[cfg(unix)]
+    fn retry_on_text_file_busy<T>(
+        mut action: impl FnMut() -> std::result::Result<T, EditorFailure>,
+    ) -> std::result::Result<T, EditorFailure> {
+        const ATTEMPTS: usize = 25;
+        for attempt in 1..=ATTEMPTS {
+            match action() {
+                Err(EditorFailure::RunFailed(err))
+                    if attempt < ATTEMPTS && is_text_file_busy(&err) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+        unreachable!("循环内必返回")
+    }
+
+    #[cfg(unix)]
+    fn open_with_retry(
+        launcher: &dyn EditorLauncher,
+        path: &Path,
+    ) -> std::result::Result<(), EditorFailure> {
+        retry_on_text_file_busy(|| {
+            // `open` 已把原因包进 anyhow；这里统一按「执行失败」分类，
+            // 只有 ETXTBSY 会被重试，其余立即返回。
+            launcher.open(path).map_err(EditorFailure::RunFailed)
+        })
+    }
+
+    #[cfg(unix)]
+    fn is_text_file_busy(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::ExecutableFileBusy)
+        })
+    }
+
     #[cfg(unix)]
     #[test]
     fn configured_editor_receives_path_as_argument() {
@@ -210,7 +262,7 @@ mod tests {
         let note = note_in(temp.path());
 
         let launcher = SystemEditor::new(Some(editor.display().to_string()), Language::Zh);
-        launcher.open(&note).expect("打开笔记");
+        open_with_retry(&launcher, &note).expect("打开笔记");
 
         let recorded = fs::read_to_string(&record).expect("读取记录");
         assert_eq!(recorded, note.display().to_string());
@@ -233,7 +285,7 @@ mod tests {
 
         let spec = format!("{} -w", editor.display());
         let launcher = SystemEditor::new(Some(spec), Language::Zh);
-        launcher.open(&note).expect("打开笔记");
+        open_with_retry(&launcher, &note).expect("打开笔记");
 
         let recorded = fs::read_to_string(&record).expect("读取记录");
         // 这曾经是 P0 缺陷：整串被当作程序名，导致 NotFound。
@@ -246,7 +298,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let note = note_in(temp.path());
 
-        let failure = try_editor("__gg_no_such_editor__", &note).expect_err("必须失败");
+        let failure = retry_on_text_file_busy(|| try_editor("__gg_no_such_editor__", &note))
+            .expect_err("必须失败");
         assert!(
             matches!(failure, EditorFailure::NotInstalled(_)),
             "实际: {failure:?}"
@@ -262,7 +315,8 @@ mod tests {
         let editor = fake_editor(temp.path(), "quitter", "#!/bin/sh\nexit 3\n");
         let note = note_in(temp.path());
 
-        let failure = try_editor(&editor.display().to_string(), &note).expect_err("必须失败");
+        let failure = retry_on_text_file_busy(|| try_editor(&editor.display().to_string(), &note))
+            .expect_err("必须失败");
         match failure {
             EditorFailure::RunFailed(err) => {
                 let msg = format!("{err:#}");
@@ -281,8 +335,7 @@ mod tests {
         let note = note_in(temp.path());
 
         let launcher = SystemEditor::new(Some(editor.display().to_string()), Language::Zh);
-        let err = launcher
-            .open(&note)
+        let err = open_with_retry(&launcher, &note)
             .expect_err("执行失败必须向上报错，而不是静默换一个编辑器");
 
         let msg = format!("{err:#}");
