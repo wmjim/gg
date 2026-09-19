@@ -24,7 +24,8 @@ pub enum OutputTarget {
 
 /// 渲染端口，便于测试时替换为假实现。
 pub trait Renderer {
-    fn render(&self, markdown: &str, target: OutputTarget) -> Result<()>;
+    /// `command` 是笔记对应的命令名，浏览器模式下用于页面标题与书脊栏。
+    fn render(&self, markdown: &str, target: OutputTarget, command: &str) -> Result<()>;
 }
 
 pub struct MarkdownRenderer {
@@ -38,13 +39,13 @@ impl MarkdownRenderer {
 }
 
 impl Renderer for MarkdownRenderer {
-    fn render(&self, markdown: &str, target: OutputTarget) -> Result<()> {
+    fn render(&self, markdown: &str, target: OutputTarget, command: &str) -> Result<()> {
         match target {
             OutputTarget::Terminal => {
                 self.render_to_terminal(markdown);
                 Ok(())
             }
-            OutputTarget::Browser => self.render_to_browser(markdown),
+            OutputTarget::Browser => self.render_to_browser(markdown, command),
         }
     }
 }
@@ -58,8 +59,8 @@ impl MarkdownRenderer {
         }
     }
 
-    fn render_to_browser(&self, markdown: &str) -> Result<()> {
-        let html = convert_md_to_html(markdown, self.lang);
+    fn render_to_browser(&self, markdown: &str, command: &str) -> Result<()> {
+        let html = convert_md_to_html(markdown, self.lang, command);
         let dir = browser_cache_dir()?;
         prune_stale_render_files(&dir, STALE_RENDER_MAX_AGE);
 
@@ -214,11 +215,32 @@ fn prune_stale_render_files(dir: &Path, max_age: Duration) {
 
 const TEMPLATE: &str = include_str!("assets/note_template.html");
 
-fn convert_md_to_html(markdown: &str, lang: Language) -> String {
+/// 把 Markdown 与元信息填进模板。
+///
+/// `{{body}}` 必须最后替换：否则笔记正文里若出现 `{{lang}}` 之类的字面量
+/// 会被当成占位符二次展开。
+fn convert_md_to_html(markdown: &str, lang: Language, command: &str) -> String {
     TEMPLATE
         .replace("{{lang}}", lang.code())
-        .replace("{{title}}", "gg notes")
+        .replace("{{command}}", &html_escape(command))
         .replace("{{body}}", &markdown_to_html_body(markdown))
+}
+
+/// 命令名会进 `<title>` 与 HTML 文本，需要转义，否则 `gg '<x>'` 之类
+/// 的命令名会破坏文档结构。
+fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn markdown_to_html_body(markdown: &str) -> String {
@@ -251,7 +273,12 @@ fn print_raw(markdown: &str) {
 /// 供集成测试确认模板占位符全部被替换。
 #[cfg(test)]
 pub(crate) fn render_html_for_test(markdown: &str) -> String {
-    convert_md_to_html(markdown, Language::Zh)
+    convert_md_to_html(markdown, Language::Zh, "demo")
+}
+
+#[cfg(test)]
+pub(crate) fn render_html_with_command_for_test(markdown: &str, command: &str) -> String {
+    convert_md_to_html(markdown, Language::Zh, command)
 }
 
 #[cfg(test)]
@@ -362,6 +389,337 @@ mod tests {
             TEMPLATE.contains(r#"li:has(input[type="checkbox"])"#),
             "模板缺少与实际产出对齐的任务列表选择器"
         );
+    }
+
+    // ---------- 模板不变量守护 ----------
+    //
+    // 这个模板历史上踩过两类坑，都是「模板与渲染器/主题脱节」且没有任何测试能发现：
+    //   1. 死选择器：`.task-list-item`、`.command` 是抄来的类名，pulldown-cmark
+    //      从不输出，规则静默失效；
+    //   2. 未主题化颜色：表格背景硬编码 `#ffffff`，深色模式下文字对比度掉到
+    //      1.54:1，表格整块不可读。
+    // 下面三条用例把这两类问题钉死在 CI 上。
+
+    /// 覆盖全部语法，用于让所有产物类名都出现。
+    const SAMPLE: &str = "\
+# 标题\n\
+\n\
+定义 `grep` 与 [链接](https://example.com)。\n\
+\n\
+- 无序项\n\
+- [ ] 待办\n\
+\n\
+1. 有序项\n\
+\n\
+```bash\n\
+grep -rn x .\n\
+```\n\
+\n\
+| 参数 | 说明 |\n\
+|---|---|\n\
+| `-i` | 忽略大小写 |\n\
+\n\
+> 旁注\n\
+\n\
+---\n\
+\n\
+脚注[^1]\n\
+\n\
+[^1]: 脚注内容\n";
+
+    fn template_css() -> &'static str {
+        TEMPLATE
+            .split_once("<style>")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(css, _)| css)
+            .expect("模板内应有 <style> 块")
+    }
+
+    /// 挖掉所有 `:root` 变量块（含 `@media` 内嵌的），只留内容样式。
+    fn strip_root_blocks(css: &str) -> String {
+        let chars: Vec<char> = css.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i..].starts_with(&[':', 'r', 'o', 'o', 't']) {
+                let Some(open) = chars[i..].iter().position(|c| *c == '{') else {
+                    break;
+                };
+                let mut depth = 0usize;
+                let mut j = i + open;
+                while j < chars.len() {
+                    match chars[j] {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                i = j + 1;
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// CSS 里出现的类选择器名。`[a-z]` 开头的要求自动排除 `1.5rem` 这类小数。
+    fn css_classes(css: &str) -> std::collections::BTreeSet<String> {
+        let chars: Vec<char> = css.chars().collect();
+        let mut found = std::collections::BTreeSet::new();
+        for (i, ch) in chars.iter().enumerate() {
+            if *ch != '.' {
+                continue;
+            }
+            let name: String = chars[i + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_alphanumeric() || **c == '-' || **c == '_')
+                .collect();
+            if name.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                found.insert(name);
+            }
+        }
+        found
+    }
+
+    fn emitted_classes(html: &str) -> std::collections::BTreeSet<String> {
+        html.split("class=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .flat_map(|value| value.split_whitespace().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn every_css_class_selector_matches_the_rendered_markup() {
+        let html = render_html_for_test(SAMPLE);
+        let emitted = emitted_classes(&html);
+        let dead: Vec<String> = css_classes(template_css())
+            .into_iter()
+            .filter(|name| !emitted.contains(name))
+            .collect();
+
+        assert!(
+            dead.is_empty(),
+            "CSS 里这些类选择器在渲染产物中不存在，规则会静默失效: {dead:?}\n产物类名: {emitted:?}"
+        );
+    }
+
+    #[test]
+    fn colors_are_defined_only_in_theme_blocks() {
+        let content = strip_root_blocks(template_css());
+        let chars: Vec<char> = content.chars().collect();
+
+        let mut offenders: Vec<String> = Vec::new();
+        for (i, ch) in chars.iter().enumerate() {
+            if *ch != '#' {
+                continue;
+            }
+            let hex: String = chars[i + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_hexdigit())
+                .collect();
+            if matches!(hex.len(), 3 | 6) {
+                offenders.push(format!("#{hex}"));
+            }
+        }
+        for func in ["rgb(", "rgba(", "hsl(", "hsla("] {
+            if content.contains(func) {
+                offenders.push(func.to_string());
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "这些字面量颜色不在 :root 里，不会随深浅色切换，深色模式下会变成亮斑: {offenders:?}"
+        );
+    }
+
+    /// 取出 `needle` 之后第一个花括号块的内容。
+    fn braced_block_after(text: &str, needle: &str) -> String {
+        let start = text.find(needle).expect("能找到选择器") + needle.len();
+        let chars: Vec<char> = text[start..].chars().collect();
+        let open = chars.iter().position(|c| *c == '{').expect("块开始");
+        let mut depth = 0usize;
+        let mut out = String::new();
+        for ch in &chars[open..] {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    if depth == 1 {
+                        continue;
+                    }
+                }
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            out.push(*ch);
+        }
+        out
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct Rgba(u8, u8, u8, f64);
+
+    impl Rgba {
+        fn parse(raw: &str) -> Option<Self> {
+            let raw = raw.trim();
+            if let Some(hex) = raw.strip_prefix('#') {
+                let hex = match hex.len() {
+                    3 => hex.chars().flat_map(|c| [c, c]).collect::<String>(),
+                    6 => hex.to_string(),
+                    _ => return None,
+                };
+                let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+                return Some(Self(byte(0)?, byte(2)?, byte(4)?, 1.0));
+            }
+
+            let inner = raw
+                .strip_prefix("rgb(")
+                .or_else(|| raw.strip_prefix("rgba("))?
+                .strip_suffix(')')?;
+            let parts: Vec<f64> = inner
+                .split(',')
+                .filter_map(|part| part.trim().parse().ok())
+                .collect();
+            match parts.as_slice() {
+                [r, g, b] => Some(Self(*r as u8, *g as u8, *b as u8, 1.0)),
+                [r, g, b, a] => Some(Self(*r as u8, *g as u8, *b as u8, *a)),
+                _ => None,
+            }
+        }
+
+        /// 把自身（可能半透明）叠到底色上，得到实际显示色。
+        fn over(self, backdrop: Self) -> Self {
+            let mix = |top: u8, bottom: u8| {
+                (f64::from(top) * self.3 + f64::from(bottom) * (1.0 - self.3)).round() as u8
+            };
+            Self(
+                mix(self.0, backdrop.0),
+                mix(self.1, backdrop.1),
+                mix(self.2, backdrop.2),
+                1.0,
+            )
+        }
+
+        fn luminance(self) -> f64 {
+            let channel = |value: u8| {
+                let value = f64::from(value) / 255.0;
+                if value <= 0.039_28 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(self.0) + 0.7152 * channel(self.1) + 0.0722 * channel(self.2)
+        }
+
+        /// WCAG 对比度：`self` 作为前景，`backdrop` 作为不透明底色。
+        fn contrast_over(self, backdrop: Self) -> f64 {
+            let front = self.over(backdrop).luminance();
+            let back = backdrop.luminance();
+            let (hi, lo) = if front > back {
+                (front, back)
+            } else {
+                (back, front)
+            };
+            (hi + 0.05) / (lo + 0.05)
+        }
+    }
+
+    fn theme_vars(block: &str) -> std::collections::BTreeMap<String, Rgba> {
+        let mut vars = std::collections::BTreeMap::new();
+        for line in block.lines() {
+            let line = line.trim().trim_end_matches(';');
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let name = name.trim();
+            if !name.starts_with("--") {
+                continue;
+            }
+            if let Some(color) = Rgba::parse(value) {
+                vars.insert(name.to_string(), color);
+            }
+        }
+        vars
+    }
+
+    /// 主题对比度守护。上一版的做法是表格背景硬编码 `#ffffff`，深色模式下
+    /// 表格正文掉到 1.54:1（WCAG AA 需 4.5:1），整块读不了。
+    #[test]
+    fn theme_contrast_meets_wcag_aa_in_both_modes() {
+        let css = template_css();
+        let dark = theme_vars(&braced_block_after(css, ":root"));
+        let light_vars = theme_vars(&braced_block_after(
+            &braced_block_after(css, "@media (prefers-color-scheme: light)"),
+            ":root",
+        ));
+
+        // (说明, 前景变量, 背景变量, 最低对比度)
+        // 半透明背景（--zebra/--hover）会先叠到 --bg 上再算。
+        let requirements = [
+            ("正文", "--fg", "--bg", 4.5),
+            ("次级文字", "--fg-muted", "--bg", 4.5),
+            ("链接", "--link", "--bg", 4.5),
+            ("行内代码", "--accent", "--surface-2", 4.5),
+            ("代码块正文", "--fg", "--surface", 4.5),
+            ("表格表头", "--fg-muted", "--surface-2", 4.5),
+            ("表格斑马行", "--fg", "--zebra", 4.5),
+            ("表格悬停行", "--fg", "--hover", 4.5),
+            ("引用旁注", "--fg-muted", "--surface", 4.5),
+            ("装饰标记", "--accent-dim", "--bg", 3.0),
+        ];
+
+        for (mode, vars) in [("深色（默认）", &dark), ("浅色", &light_vars)] {
+            let page = *vars.get("--bg").expect("--bg 必须定义");
+            for (label, fg, bg, minimum) in requirements {
+                let fg = *vars.get(fg).unwrap_or_else(|| panic!("{fg} 未定义"));
+                let bg = *vars.get(bg).unwrap_or_else(|| panic!("{bg} 未定义"));
+                let ratio = fg.contrast_over(bg.over(page));
+                assert!(
+                    ratio >= minimum,
+                    "{mode} 的「{label}」对比度只有 {ratio:.2}:1，低于要求的 {minimum}:1"
+                );
+            }
+        }
+    }
+
+    // ---------- 命令名透传 ----------
+
+    #[test]
+    fn title_and_rail_carry_the_command_name() {
+        let html = render_html_with_command_for_test("正文", "systemctl");
+
+        assert!(
+            html.contains("<title>systemctl · gg</title>"),
+            "页面标题应带上命令名，否则多开标签页无法区分"
+        );
+        assert!(
+            html.contains(r#"<div class="rail__cmd">systemctl</div>"#),
+            "书脊栏应显示命令名"
+        );
+    }
+
+    /// 命令名可以合法地包含 `<`、`&` 等字符（只禁止空白与路径分隔符），
+    /// 直接拼进 HTML 会破坏文档结构。
+    #[test]
+    fn command_name_is_escaped() {
+        let html = render_html_with_command_for_test("正文", "<b>&\"'");
+
+        assert!(!html.contains("<b>&"), "命令名未转义: {html}");
+        assert!(html.contains("&lt;b&gt;&amp;&quot;&#39;"), "转义结果不对");
     }
 
     #[test]

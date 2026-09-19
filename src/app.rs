@@ -285,7 +285,9 @@ impl<'a> QueryService<'a> {
         }
 
         if let Some(markdown) = notes::read_note(self.notes_dir, command)? {
-            self.deps.renderer.render(&markdown, options.target)?;
+            self.deps
+                .renderer
+                .render(&markdown, options.target, command)?;
             return Ok(QueryOutcome::Rendered);
         }
 
@@ -346,7 +348,9 @@ impl<'a> QueryService<'a> {
         } else {
             // 没落盘就只能当场输出，否则刚生成的内容直接丢失。
             eprintln!("{}", lang.save_skipped());
-            self.deps.renderer.render(&generated, options.target)?;
+            self.deps
+                .renderer
+                .render(&generated, options.target, command)?;
         }
         Ok(QueryOutcome::AiGenerated)
     }
@@ -414,11 +418,13 @@ mod tests {
     #[derive(Default)]
     struct FakeRenderer {
         rendered: RefCell<Vec<String>>,
+        titles: RefCell<Vec<String>>,
     }
 
     impl Renderer for FakeRenderer {
-        fn render(&self, markdown: &str, _target: OutputTarget) -> Result<()> {
+        fn render(&self, markdown: &str, _target: OutputTarget, command: &str) -> Result<()> {
             self.rendered.borrow_mut().push(markdown.to_string());
+            self.titles.borrow_mut().push(command.to_string());
             Ok(())
         }
     }
