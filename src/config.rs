@@ -6,21 +6,50 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
-/// AI 提供方。用枚举承载，非法取值在配置反序列化阶段就会报错，
-/// 而不是等到查询时才提示「v1 仅支持 claude」。
+/// AI 提供方。非法取值在配置反序列化阶段就报错，而不是等查询时才提示。
+///
+/// 每个预设只固定「可执行文件 + 提示词之前的固定参数」，提示词一律追加为
+/// 最后一个参数 —— `claude -p`、`codex exec`、`gemini -p`、`llm`、`aichat`
+/// 都是这个约定。需要别的形态就用 [`AppConfig::ai_command`] 自定义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AiProvider {
+    /// 关闭 AI 回退，未命中笔记时只给建议。
+    None,
     #[default]
     Claude,
+    Codex,
+    Gemini,
 }
 
 impl AiProvider {
     pub fn code(self) -> &'static str {
         match self {
+            AiProvider::None => "none",
             AiProvider::Claude => "claude",
+            AiProvider::Codex => "codex",
+            AiProvider::Gemini => "gemini",
         }
     }
+
+    /// 预设的可执行文件与固定参数；`None` 表示禁用。
+    fn preset(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            AiProvider::None => None,
+            AiProvider::Claude => Some(("claude", "-p --output-format text")),
+            AiProvider::Codex => Some(("codex", "exec")),
+            AiProvider::Gemini => Some(("gemini", "-p")),
+        }
+    }
+}
+
+/// 本次运行实际要执行的 AI 命令。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AiInvocation {
+    /// 不对接任何 AI。
+    Disabled,
+    /// 命令行模板；提示词追加为最后一个参数，也可用 `{prompt}` 指定位置。
+    Command(String),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -31,6 +60,9 @@ pub struct AppConfig {
     pub ask_before_save: bool,
     pub ai_note_language: String,
     pub ai_provider: AiProvider,
+    /// 自定义 AI 命令行，优先级高于 `ai_provider` 预设。
+    /// 例如 `"llm -m gpt-4o"`、`"ollama run qwen2.5"`。
+    pub ai_command: Option<String>,
     /// AI 生成的最长等待秒数；`0` 表示不限制。
     pub ai_timeout_seconds: u64,
     pub editor: Option<String>,
@@ -45,6 +77,7 @@ impl Default for AppConfig {
             ask_before_save: false,
             ai_note_language: "zh-CN".to_string(),
             ai_provider: AiProvider::Claude,
+            ai_command: None,
             ai_timeout_seconds: 180,
             editor: None,
             language: None,
@@ -94,6 +127,28 @@ impl AppConfig {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
+    }
+
+    /// 解析出本次实际要执行的 AI 命令。
+    ///
+    /// 优先级：`ai_command` > `GG_AI_BIN`（`GG_CLAUDE_BIN` 为兼容旧版保留）>
+    /// `ai_provider` 预设。`GG_AI_BIN` 只替换可执行文件，保留预设参数。
+    pub fn ai_invocation(&self) -> AiInvocation {
+        if let Some(custom) = self
+            .ai_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return AiInvocation::Command(custom.to_string());
+        }
+
+        let Some((bin, preset_args)) = self.ai_provider.preset() else {
+            return AiInvocation::Disabled;
+        };
+
+        let bin = ai_bin_override().unwrap_or_else(|| bin.to_string());
+        AiInvocation::Command(format!("{bin} {preset_args}"))
     }
 
     /// `ai_timeout_seconds = 0` 表示不限制等待时长。
@@ -165,6 +220,15 @@ pub(crate) fn resolve_notes_dir_with(
 
 fn config_root_dir() -> Result<PathBuf> {
     dirs::config_dir().context("无法确定系统配置目录")
+}
+
+fn ai_bin_override() -> Option<String> {
+    ["GG_AI_BIN", "GG_CLAUDE_BIN"].iter().find_map(|key| {
+        env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 #[cfg(test)]

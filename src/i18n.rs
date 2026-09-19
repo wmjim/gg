@@ -121,25 +121,29 @@ impl Language {
         },
 
         // ---------- AI 回退 ----------
+        ai_disabled() => {
+            zh: "已配置 ai_provider = \"none\"，AI 回退已关闭。",
+            en: "ai_provider = \"none\": AI fallback is disabled.",
+        },
         ai_skipped_non_interactive() => {
             zh: "非交互终端，已跳过 AI 回退（设置 ask_before_ai = false 可强制启用）。",
             en: "Non-interactive terminal: skipped AI fallback (set ask_before_ai = false to force it).",
         },
         ai_progress(command: &str) => {
-            zh: "正在调用 claude 生成 `{command}` 的笔记，请稍候…",
-            en: "Asking claude to generate notes for `{command}`, please wait…",
+            zh: "正在生成 `{command}` 的笔记",
+            en: "Generating notes for `{command}`",
         },
-        claude_timeout(seconds: u64) => {
-            zh: "claude 在 {seconds} 秒内未返回，已终止进程（可调整 ai_timeout_seconds，设为 0 表示不限制）。",
-            en: "claude did not return within {seconds}s and was terminated (tune ai_timeout_seconds; 0 disables the limit).",
+        ai_timeout(seconds: u64) => {
+            zh: "AI 在 {seconds} 秒内未返回，已终止进程（可调整 ai_timeout_seconds，设为 0 表示不限制）。",
+            en: "AI did not return within {seconds}s and was terminated (tune ai_timeout_seconds; 0 disables the limit).",
         },
-        claude_missing() => {
-            zh: "未检测到 claude CLI，已跳过 AI 回退。",
-            en: "claude CLI not found, skipped AI fallback.",
+        ai_tool_missing(tool: &str) => {
+            zh: "未找到 AI 命令行工具 `{tool}`，已跳过 AI 回退（可用 ai_provider 或 ai_command 配置）。",
+            en: "AI command `{tool}` not found, skipped AI fallback (configure ai_provider or ai_command).",
         },
         ask_generate_note() => {
-            zh: "检测到 claude，可尝试生成该笔记。是否继续查询？",
-            en: "claude detected. Generate this note?",
+            zh: "可尝试生成该笔记。是否继续查询？",
+            en: "Generate this note?",
         },
         ai_cancelled() => {
             zh: "已取消 AI 查询。",
@@ -149,17 +153,17 @@ impl Language {
             zh: "是否保存这份 AI 生成笔记到本地？",
             en: "Save the AI-generated note locally?",
         },
-        claude_failed(detail: &str) => {
-            zh: "claude 调用失败: {detail}",
-            en: "claude invocation failed: {detail}",
+        ai_failed(detail: &str) => {
+            zh: "AI 调用失败: {detail}",
+            en: "AI invocation failed: {detail}",
         },
-        claude_empty_output() => {
-            zh: "claude 返回了空内容。",
-            en: "claude returned empty content.",
+        ai_empty_output() => {
+            zh: "AI 返回了空内容。",
+            en: "AI returned empty content.",
         },
-        claude_output_not_utf8() => {
-            zh: "claude 输出不是合法的 UTF-8。",
-            en: "claude output is not valid UTF-8.",
+        ai_output_not_utf8() => {
+            zh: "AI 输出不是合法的 UTF-8。",
+            en: "AI output is not valid UTF-8.",
         },
 
         // ---------- 渲染 ----------

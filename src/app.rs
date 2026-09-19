@@ -3,17 +3,17 @@
 //! 查询逻辑收敛到 [`QueryService`]，通过 [`QueryDeps`] 注入渲染器、提示器、
 //! AI 生成器与编辑器，使「非交互场景不得触发 AI / 落盘」这类规则可被单测覆盖。
 
-use crate::ai::{ClaudeGenerator, NoteGenerator};
+use crate::ai::{AiNoteGenerator, NoteGenerator};
 use crate::cli::{Action, Cli};
-use crate::config::{self, AppConfig};
+use crate::config::{self, AiInvocation, AppConfig};
 use crate::editor::{EditorLauncher, SystemEditor};
 use crate::i18n::Language;
 use crate::notes;
 use crate::prompt::{ConsolePrompter, Prompter};
 use crate::render::{MarkdownRenderer, OutputTarget, Renderer};
 use crate::utils::debug_log;
-use crate::utils::layout;
 use crate::utils::output;
+use crate::utils::{layout, spinner};
 use anyhow::{Context, Result};
 use std::io::{self, IsTerminal};
 use std::path::Path;
@@ -94,11 +94,15 @@ pub fn run(cli: Cli) -> Result<ExitCode> {
 
             let renderer = MarkdownRenderer::new(lang);
             let editor = SystemEditor::from_config(&config);
-            let generator = ClaudeGenerator::new(lang, config.ai_timeout());
+            let generator = AiNoteGenerator::from_invocation(
+                lang,
+                config.ai_timeout(),
+                &config.ai_invocation(),
+            );
             let deps = QueryDeps {
                 renderer: &renderer,
                 editor: &editor,
-                generator: &generator,
+                generator: generator.as_ref(),
                 prompter: &prompter,
             };
             let service = QueryService::new(&notes_dir, &config, &deps);
@@ -288,8 +292,16 @@ impl<'a> QueryService<'a> {
     fn ai_fallback(&self, command: &str, options: QueryOptions) -> Result<QueryOutcome> {
         let lang = self.config.language();
 
+        if matches!(self.config.ai_invocation(), AiInvocation::Disabled) {
+            eprintln!("{}", lang.ai_disabled());
+            return Ok(QueryOutcome::AiUnavailable);
+        }
+
         if !self.deps.generator.is_available() {
-            eprintln!("{}", lang.claude_missing());
+            eprintln!(
+                "{}",
+                lang.ai_tool_missing(&self.deps.generator.description())
+            );
             return Ok(QueryOutcome::AiUnavailable);
         }
 
@@ -313,11 +325,7 @@ impl<'a> QueryService<'a> {
         }
 
         debug_log!("app::ai_fallback: 为 `{command}` 生成笔记");
-        eprintln!("{}", lang.ai_progress(command));
-        let generated = self
-            .deps
-            .generator
-            .generate(command, &self.config.ai_note_language)?;
+        let generated = self.generate_with_progress(command, lang)?;
         self.deps.renderer.render(&generated, options.target)?;
 
         if self.should_save(options)? {
@@ -326,6 +334,28 @@ impl<'a> QueryService<'a> {
             eprintln!("{}", lang.save_skipped());
         }
         Ok(QueryOutcome::AiGenerated)
+    }
+
+    /// 调用 AI，期间在终端显示转圈动画。
+    ///
+    /// 动画只在 stderr 是终端时启用；否则退化为一行静态提示，
+    /// 避免日志里塞满控制字符。
+    fn generate_with_progress(&self, command: &str, lang: Language) -> Result<String> {
+        let label = lang.ai_progress(command);
+        let mut spinner =
+            spinner::Spinner::start(label.clone(), spinner::stderr_supports_animation());
+        if !spinner.is_active() {
+            eprintln!("{label}");
+        }
+
+        let result = self
+            .deps
+            .generator
+            .generate(command, &self.config.ai_note_language);
+
+        // 必须在打印结果/报错前擦除动画行，否则会互相覆盖。
+        spinner.stop();
+        result
     }
 
     /// 落盘决策：`--yes` 视为对所有询问回答「是」；未启用询问则按 `auto_save_ai`。
@@ -416,6 +446,10 @@ mod tests {
     }
 
     impl NoteGenerator for FakeGenerator {
+        fn description(&self) -> String {
+            "fake-ai".to_string()
+        }
+
         fn is_available(&self) -> bool {
             self.available
         }

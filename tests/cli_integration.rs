@@ -44,12 +44,16 @@ fn create_fake_claude(temp: &TempDir) -> PathBuf {
     // `--version` 探测不写标记；标记存在即代表真的走到了生成路径。
     // `GG_TEST_HANG` 用于验证ai_timeout_seconds 能终止不返回的子进程。
     let path = temp.path().join("fake-claude");
+    // 模拟真实模型输出：以人手会写坏习惯的 `# 标题` 开头，用来验证会被剥离。
     let script = "#!/bin/sh\n\
                   if [ \"$1\" = \"--version\" ]; then echo 'claude 0.0.1'; exit 0; fi\n\
                   if [ -n \"$GG_TEST_HANG\" ]; then sleep 30; exit 0; fi\n\
                   if [ -n \"$GG_TEST_MARKER\" ]; then echo called >> \"$GG_TEST_MARKER\"; fi\n\
-                  echo '# AI Note'\n\
-                  echo 'generated for testing'\n";
+                  echo '# foo 命令速查'\n\
+                  echo ''\n\
+                  echo '`foo`：测试用命令。'\n\
+                  echo ''\n\
+                  echo '- `-x`：测试选项'\n";
     fs::write(&path, script).expect("写入假 claude 脚本");
 
     let mut perms = fs::metadata(&path).expect("stat 假 claude").permissions();
@@ -71,8 +75,11 @@ fn create_fake_claude(temp: &TempDir) -> PathBuf {
                     exit /b 0\r\n\
                   )\r\n\
                   if not \"%GG_TEST_MARKER%\"==\"\" echo called >> \"%GG_TEST_MARKER%\"\r\n\
-                  echo # AI Note\r\n\
-                  echo generated for testing\r\n";
+                  echo # foo 命令速查\r\n\
+                  echo.\r\n\
+                  echo `foo`：测试用命令。\r\n\
+                  echo.\r\n\
+                  echo - `-x`：测试选项\r\n";
     fs::write(&path, script).expect("写入假 claude 脚本");
     path
 }
@@ -81,6 +88,53 @@ fn write_config(temp: &TempDir, body: &str) {
     let config_dir = temp.path().join("appdata").join("gg");
     fs::create_dir_all(&config_dir).expect("创建配置目录");
     fs::write(config_dir.join("config.toml"), body).expect("写入配置");
+}
+
+/// 创建一个会记录自己 argv 的假 AI 工具，返回 (可执行文件, argv 记录文件)。
+fn fake_ai_tool(temp: &TempDir, name: &str) -> (PathBuf, PathBuf) {
+    let record = temp.path().join(format!("{name}-argv.txt"));
+    let bin = temp.path().join(name);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // 先记录 argv，再输出一段合法笔记正文，避免被判为「AI 返回空内容」。
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\necho '`foo`：测试用命令。'\n",
+            record.display()
+        );
+        fs::write(&bin, body).expect("写假 AI 工具");
+        let mut perms = fs::metadata(&bin).expect("stat").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).expect("chmod");
+    }
+    #[cfg(windows)]
+    {
+        let body = format!(
+            "@echo off\r\necho %* >> \"{}\"\r\necho `foo`：测试用命令。\r\n",
+            record.display()
+        );
+        fs::write(&bin, body).expect("写假 AI 工具");
+    }
+
+    (bin, record)
+}
+
+/// 把目录插到子进程 PATH 最前面，用于让预设（claude/codex/gemini）命中假工具。
+fn prepend_path(cmd: &mut assert_cmd::Command, dir: &Path) {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let joined = std::env::join_paths(std::env::split_paths(&existing).collect::<Vec<_>>())
+        .and_then(|paths| {
+            std::env::join_paths(
+                std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&paths)),
+            )
+        })
+        .expect("拼接 PATH");
+    cmd.env("PATH", joined);
+}
+
+fn read_record(path: &Path) -> String {
+    fs::read_to_string(path).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- 基础查询
@@ -381,7 +435,7 @@ fn yes_flag_authorizes_non_interactive_generation() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("# AI Note"))
+        .stdout(predicate::str::contains("`foo`：测试用命令。"))
         .stderr(predicate::str::contains("已保存笔记"));
 
     assert!(marker.exists(), "--yes 应当授权调用 claude");
@@ -422,6 +476,152 @@ fn list_survives_unreadable_entry_and_warns() {
         .success()
         .stdout("ls\n")
         .stderr(predicate::str::contains("无法读取"));
+}
+
+// ---------------------------------------------------------------- AI 后端选择
+
+#[test]
+fn ai_provider_none_disables_fallback() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+    write_config(&temp, "language = \"zh\"\nai_provider = \"none\"\n");
+
+    let mut cmd = command_for(&temp);
+    // 即便有可用的 claude，也不应被调用
+    let (tool, record) = fake_ai_tool(&temp, "claude");
+    cmd.env("GG_AI_BIN", &tool);
+    cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
+
+    cmd.assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("AI 回退已关闭"));
+
+    assert!(
+        !record.exists(),
+        "ai_provider = none 时不应调用任何 AI 工具"
+    );
+}
+
+/// `ai_command` 优先级高于 `ai_provider` 预设，包括 none。
+#[test]
+fn custom_ai_command_takes_precedence_over_preset() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+    let (tool, record) = fake_ai_tool(&temp, "mytool");
+
+    write_config(
+        &temp,
+        &format!(
+            "language = \"zh\"\nai_provider = \"none\"\nai_command = \"{} --flag\"\nask_before_ai = false\nauto_save_ai = false\n",
+            tool.display()
+        ),
+    );
+
+    let mut cmd = command_for(&temp);
+    cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
+    cmd.assert().success();
+
+    let argv = read_record(&record);
+    assert!(
+        argv.contains("--flag"),
+        "自定义命令的参数应被传递，实际 argv:\n{argv}"
+    );
+    // 提示词作为最后一个参数追加，且必须是优化后的新提示词
+    assert!(
+        argv.contains("10~25 行"),
+        "应使用简洁版提示词，实际 argv:\n{argv}"
+    );
+    assert!(
+        argv.contains("foo"),
+        "提示词应指明目标命令，实际 argv:\n{argv}"
+    );
+}
+
+/// 预设 provider 应当拼出各自的非交互调用形式。
+#[test]
+fn provider_presets_use_their_own_arguments() {
+    for (provider, bin_name, expected_arg) in [
+        ("claude", "claude", "--output-format"),
+        ("codex", "codex", "exec"),
+        ("gemini", "gemini", "-p"),
+    ] {
+        let temp = TempDir::new().expect("tempdir");
+        let notes_dir = temp.path().join("notes");
+        fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("创建 bin 目录");
+
+        let (tool, record) = fake_ai_tool(&temp, bin_name);
+        fs::rename(&tool, bin_dir.join(bin_name)).expect("移动假工具到 bin");
+
+        write_config(
+            &temp,
+            &format!(
+                "language = \"zh\"\nai_provider = \"{provider}\"\nask_before_ai = false\nauto_save_ai = false\n"
+            ),
+        );
+
+        let mut cmd = command_for(&temp);
+        prepend_path(&mut cmd, &bin_dir);
+        cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
+        cmd.assert().success();
+
+        let argv = read_record(&record);
+        assert!(
+            argv.contains(expected_arg),
+            "{provider} 预设应包含 `{expected_arg}`，实际 argv:\n{argv}"
+        );
+    }
+}
+
+/// `GG_AI_BIN` 只替换可执行文件，保留预设参数。
+#[test]
+fn gg_ai_bin_overrides_preset_binary_only() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+    let (tool, record) = fake_ai_tool(&temp, "claude");
+
+    write_config(
+        &temp,
+        "language = \"zh\"\nai_provider = \"claude\"\nask_before_ai = false\nauto_save_ai = false\n",
+    );
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_AI_BIN", &tool);
+    cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "foo"]);
+    cmd.assert().success();
+
+    let argv = read_record(&record);
+    assert!(
+        argv.contains("--output-format"),
+        "GG_AI_BIN 只该换二进制，预设参数应保留，实际 argv:\n{argv}"
+    );
+}
+
+/// 非终端（管道）下不显示转圈，但必须有静态提示，否则用户会以为卡死。
+#[test]
+fn generation_prints_progress_when_not_a_terminal() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+    let fake_claude = create_fake_claude(&temp);
+
+    let mut cmd = command_for(&temp);
+    cmd.env("GG_CLAUDE_BIN", fake_claude);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "-y",
+        "foo",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("正在生成 `foo` 的笔记"));
 }
 
 // ---------------------------------------------------------------- 列布局
@@ -516,12 +716,21 @@ fn ai_opt_out_allows_non_interactive_generation() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("# AI Note"))
+        .stdout(predicate::str::contains("`foo`：测试用命令。"))
         .stderr(predicate::str::contains("已保存笔记"));
 
     assert!(marker.exists(), "显式选择后应当调用 claude");
     let saved = fs::read_to_string(notes_dir.join("foo.md")).expect("笔记应已保存");
-    assert!(saved.contains("# AI Note"));
+    assert!(
+        saved.contains("`foo`：测试用命令。"),
+        "实际:
+{saved}"
+    );
+    assert!(
+        !saved.contains("# foo 命令速查"),
+        "模型加的首行标题应被剥离，实际:
+{saved}"
+    );
 }
 
 /// 不返回的 claude 必须被超时终止，而不是让 `gg` 永久挂住。
