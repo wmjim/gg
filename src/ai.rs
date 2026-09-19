@@ -6,10 +6,9 @@
 use crate::config::AiInvocation;
 use crate::i18n::Language;
 use crate::utils::debug_log;
-use crate::utils::process::{resolve_program, wait_with_timeout};
+use crate::utils::process::{Program, resolve_program, split_command_line, wait_with_timeout};
 use anyhow::{Context, Result, anyhow, bail};
 use std::io::Read;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -48,9 +47,8 @@ impl NoteGenerator for DisabledGenerator {
 /// 一条解析完成的 AI 命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiCommand {
-    bin: PathBuf,
-    /// 提示词之前的参数。
-    before: Vec<String>,
+    /// 可执行文件 + 提示词之前的参数。
+    program: Program,
     /// 提示词之后的参数。
     after: Vec<String>,
 }
@@ -70,36 +68,31 @@ impl AiCommand {
                 let program = resolve_program(head.trim()).with_context(|| {
                     format!("无法解析 `{head}`（`{PROMPT_PLACEHOLDER}` 之前的命令）")
                 })?;
-                let after = shell_words::split(tail).with_context(|| {
+                let after = split_command_line(tail).with_context(|| {
                     format!("无法解析 `{tail}`（`{PROMPT_PLACEHOLDER}` 之后的参数）")
                 })?;
-                Ok(Self {
-                    bin: program.bin,
-                    before: program.args,
-                    after,
-                })
+                Ok(Self { program, after })
             }
-            None => {
-                let program = resolve_program(spec)?;
-                Ok(Self {
-                    bin: program.bin,
-                    before: program.args,
-                    after: Vec::new(),
-                })
-            }
+            None => Ok(Self {
+                program: resolve_program(spec)?,
+                after: Vec::new(),
+            }),
         }
     }
 
     /// 生成带提示词参数的 `Command`。
+    /// 生成带提示词参数的 `Command`。
+    ///
+    /// 走 `Program::command()` 而不是自己 `Command::new(bin)`：Windows 上
+    /// `.cmd` 后端必须经 `cmd.exe` 转发，这里不能绕过那层处理。
     pub fn command_for(&self, prompt: &str) -> Command {
-        let mut command = Command::new(&self.bin);
-        command.args(&self.before).arg(prompt).args(&self.after);
+        let mut command = self.program.command();
+        command.arg(prompt).args(&self.after);
         command
     }
 
     pub fn describe(&self) -> String {
-        let mut parts = vec![self.bin.display().to_string()];
-        parts.extend(self.before.iter().cloned());
+        let mut parts = vec![self.program.describe()];
         parts.extend(self.after.iter().cloned());
         parts.join(" ")
     }
@@ -355,7 +348,10 @@ mod tests {
     #[test]
     fn ai_command_appends_prompt_by_default() {
         let command = AiCommand::parse("sh -c echo").expect("解析成功");
-        assert_eq!(command.before, vec!["-c".to_string(), "echo".to_string()]);
+        assert_eq!(
+            command.program.args,
+            vec!["-c".to_string(), "echo".to_string()]
+        );
         assert!(command.after.is_empty());
         assert!(command.describe().contains("sh"));
     }
@@ -363,7 +359,7 @@ mod tests {
     #[test]
     fn ai_command_honours_prompt_placeholder() {
         let command = AiCommand::parse("sh -c {prompt} --flag").expect("解析成功");
-        assert_eq!(command.before, vec!["-c".to_string()]);
+        assert_eq!(command.program.args, vec!["-c".to_string()]);
         assert_eq!(command.after, vec!["--flag".to_string()]);
     }
 

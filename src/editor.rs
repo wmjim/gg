@@ -97,25 +97,13 @@ fn run_editor(program: &Program, path: &Path) -> Result<()> {
         path.display()
     );
 
-    #[cfg(target_os = "windows")]
-    let status = {
-        // Windows 上的 code.cmd / code.bat 无法被 CreateProcess 直接执行，
-        // 必须经由 cmd.exe 转发。
-        if needs_shell_forwarding(&program.bin) {
-            Command::new("cmd")
-                .arg("/C")
-                .arg(&program.bin)
-                .args(&program.args)
-                .arg(path)
-                .status()
-                .with_context(|| format!("无法启动 `{}`", program.describe()))?
-        } else {
-            spawn_direct(program, path)?
-        }
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let status = spawn_direct(program, path)?;
+    // Windows 上的 code.cmd / code.bat 转发由 Program::command() 统一处理，
+    // 这里不再需要平台分支。
+    let status = program
+        .command()
+        .arg(path)
+        .status()
+        .with_context(|| format!("无法启动 `{}`", program.describe()))?;
 
     if !status.success() {
         let code = status
@@ -125,22 +113,6 @@ fn run_editor(program: &Program, path: &Path) -> Result<()> {
         bail!("编辑器退出码 {code}");
     }
     Ok(())
-}
-
-fn spawn_direct(program: &Program, path: &Path) -> Result<std::process::ExitStatus> {
-    Command::new(&program.bin)
-        .args(&program.args)
-        .arg(path)
-        .status()
-        .with_context(|| format!("无法启动 `{}`", program.describe()))
-}
-
-#[cfg(target_os = "windows")]
-fn needs_shell_forwarding(bin: &Path) -> bool {
-    bin.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "cmd" | "bat"))
-        .unwrap_or(false)
 }
 
 fn env_editor_spec() -> Option<String> {

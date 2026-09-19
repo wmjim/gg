@@ -10,7 +10,7 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, html};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime};
 
 /// 浏览器渲染临时文件的最长保留时长。
@@ -108,8 +108,8 @@ impl MarkdownRenderer {
 }
 
 fn run_glow_via_stdin(program: &crate::utils::process::Program, markdown: &str) -> Result<()> {
-    let mut child = Command::new(&program.bin)
-        .args(&program.args)
+    let mut child = program
+        .command()
         .arg("-")
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
@@ -153,8 +153,8 @@ fn run_glow_via_file(program: &crate::utils::process::Program, markdown: &str) -
     file.flush().context("无法刷新临时 Markdown 文件")?;
 
     // NamedTempFile 在作用域结束时自动删除，无需手工 remove_file。
-    let status = Command::new(&program.bin)
-        .args(&program.args)
+    let status = program
+        .command()
         .arg(file.path())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

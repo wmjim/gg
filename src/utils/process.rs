@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use std::io;
 use std::path::PathBuf;
-use std::process::{Child, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 /// 等待子进程退出的轮询间隔：兼顾响应速度与 CPU 占用。
@@ -45,6 +45,45 @@ pub struct Program {
 }
 
 impl Program {
+    /// 构造用于启动的 [`Command`]。
+    ///
+    /// Windows 上 `.cmd` / `.bat` 无法被 `CreateProcess` 直接执行，必须经
+    /// `cmd.exe` 转发。编辑器、AI 后端与 glow 都受这条限制影响，因此统一
+    /// 放在这里处理 —— 各处自行 `Command::new(bin)` 正是跨平台 bug 的温床。
+    ///
+    /// 已知限制：`cmd /C` 有自己的引号剥离规则（命令行以引号开头时，会去掉
+    /// 最外层一对引号），因此**可执行文件路径含空格**时（如
+    /// `C:\Program Files\...`）转发可能被解析错。当前按参数逐个传递，在
+    /// 不含空格的路径下正确 —— 涵盖 CI 与常见的 npm / AppData 安装位置。
+    pub fn command(&self) -> Command {
+        // 判断内联在这里，而不是抽成 `#[cfg(windows)] fn`：那样会引入一个
+        // 「只在 Windows 上被使用」的类型导入（`Path`），Linux 上被判为未使用
+        // 的导入——和本仓库踩过的那次是同一个坑。
+        let is_windows_script = self.is_windows_script();
+        if is_windows_script {
+            let mut command = Command::new("cmd");
+            command.arg("/C").arg(&self.bin).args(&self.args);
+            return command;
+        }
+
+        let mut command = Command::new(&self.bin);
+        command.args(&self.args);
+        command
+    }
+
+    /// 是否需要经 `cmd.exe` 转发（Windows 的 `.cmd` / `.bat` 不能被
+    /// `CreateProcess` 直接执行）。非 Windows 上恒为 false。
+    fn is_windows_script(&self) -> bool {
+        if !cfg!(windows) {
+            return false;
+        }
+        self.bin
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "cmd" | "bat"))
+            .unwrap_or(false)
+    }
+
     /// 把参数与附加路径拼成命令行字符串，仅用于错误提示。
     pub fn describe(&self) -> String {
         let mut parts = vec![self.bin.display().to_string()];
@@ -76,8 +115,7 @@ pub fn resolve_program(spec: &str) -> Result<Program> {
         });
     }
 
-    let tokens = shell_words::split(spec)
-        .with_context(|| format!("无法解析可执行命令 {spec:?}，请检查引号是否配对"))?;
+    let tokens = split_command_line(spec)?;
 
     if let Some(program) = resolve_by_longest_prefix(&tokens) {
         return Ok(program);
@@ -94,6 +132,54 @@ pub fn resolve_program(spec: &str) -> Result<Program> {
         bin,
         args: args.to_vec(),
     })
+}
+
+/// 按 shell 词法把命令行切成词，支持单引号与双引号分组。
+///
+/// 刻意**不**把反斜杠当转义字符：Windows 路径 `C:\Tools\glow.exe` 里的
+/// 反斜杠一旦被吃掉，路径就废了。`shell_words::split` 是 POSIX 语义，
+/// 正是这么做的 —— 它在 Linux 上完全正确，在 Windows 上毁掉每一个路径。
+pub fn split_command_line(spec: &str) -> Result<Vec<String>> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_token = false;
+    let mut quote: Option<char> = None;
+
+    for ch in spec.chars() {
+        if let Some(open) = quote {
+            if ch == open {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                in_token = true;
+            }
+            c if c.is_whitespace() => {
+                if in_token {
+                    tokens.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+            }
+            c => {
+                current.push(c);
+                in_token = true;
+            }
+        }
+    }
+
+    if quote.is_some() {
+        bail!("无法解析可执行命令 {spec:?}，请检查引号是否配对");
+    }
+    if in_token {
+        tokens.push(current);
+    }
+    Ok(tokens)
 }
 
 /// 路径含空格又未加引号时，空白切分会把路径拦腰截断。
@@ -203,6 +289,67 @@ mod tests {
         let program = resolve_program(&spec).expect("resolve unquoted spaced spec");
         assert_eq!(program.bin, bin);
         assert_eq!(program.args, vec!["-w".to_string(), "--flag".to_string()]);
+    }
+
+    #[test]
+    fn splitter_preserves_windows_backslashes() {
+        // POSIX 语义的分词器会把这些反斜杠当转义吃掉，路径就废了
+        let tokens = split_command_line(r"C:\Tools\glow.exe -s dark -w 80").expect("切分成功");
+        assert_eq!(
+            tokens,
+            vec![
+                r"C:\Tools\glow.exe".to_string(),
+                "-s".to_string(),
+                "dark".to_string(),
+                "-w".to_string(),
+                "80".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn splitter_honours_quotes_and_collapses_whitespace() {
+        assert_eq!(
+            split_command_line("  \"a b\"  'c d'  e  ").expect("切分成功"),
+            vec!["a b".to_string(), "c d".to_string(), "e".to_string()]
+        );
+        assert_eq!(
+            split_command_line("").expect("切分成功"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn splitter_keeps_empty_quoted_token() {
+        assert_eq!(
+            split_command_line("cmd \"\"").expect("切分成功"),
+            vec!["cmd".to_string(), String::new()]
+        );
+    }
+
+    /// Windows 上的 AI 预设接线就靠这条：整串路径 + 参数必须停在同一个词上。
+    #[test]
+    fn resolves_windows_style_spec_with_arguments() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin = if cfg!(windows) {
+            let path = temp.path().join("fake.cmd");
+            fs::write(&path, "@echo off\r\n").expect("写脚本");
+            path
+        } else {
+            install_fake_bin(temp.path(), "fake.cmd")
+        };
+
+        let spec = format!("{} -p --output-format text", bin.display());
+        let program = resolve_program(&spec).expect("解析成功");
+        assert_eq!(program.bin, bin);
+        assert_eq!(
+            program.args,
+            vec![
+                "-p".to_string(),
+                "--output-format".to_string(),
+                "text".to_string()
+            ]
+        );
     }
 
     #[test]
