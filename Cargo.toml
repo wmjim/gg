@@ -34,6 +34,10 @@ panic = "abort"
 
 [lints.rust]
 unsafe_code = "forbid"
+# 未使用的导入只在特定平台出现（某分支被 cfg 掉后，导入就没人用了）。
+# 提升为错误，避免它长期以 warning 形式被忽略 —— 本仓库为此踩过两次：
+# 一次是删掉只在 Windows/macOS 用到的 anyhow::Context，一次是 Path/Command。
+unused_imports = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
