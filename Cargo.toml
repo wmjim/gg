@@ -1,6 +1,6 @@
 [package]
 name = "gg"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "像 man 一样查询你自己的命令笔记 / Query your own command notes like man"
