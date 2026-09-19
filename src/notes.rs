@@ -381,19 +381,34 @@ mod tests {
     fn scan_commands_skips_unreadable_entries_and_reports_them() {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(temp.path().join("ls.md"), "# ls\n").expect("写笔记");
-        // 非 UTF-8 文件名在 Unix 上可构造；否则该分支由 read_dir 失败覆盖。
-        #[cfg(unix)]
-        {
-            use std::ffi::OsStr;
-            use std::os::unix::ffi::OsStrExt;
-            let bad = OsStr::from_bytes(b"\xff\xfe.md");
-            fs::write(temp.path().join(bad), "# bad\n").expect("写非法文件名");
-        }
+
+        let Some(_bad) = write_non_utf8_note(temp.path()) else {
+            eprintln!("[跳过] 当前文件系统不接受非 UTF-8 文件名");
+            return;
+        };
 
         let found = scan_commands(temp.path()).expect("扫描目录不应整体失败");
         assert_eq!(found.items, vec!["ls".to_string()]);
-        #[cfg(unix)]
         assert_eq!(found.skipped.len(), 1, "非法文件名应被记录并跳过");
+    }
+
+    /// 造一个「文件名不是合法 UTF-8」的笔记。
+    ///
+    /// 并非所有文件系统都接受这种名字 —— macOS 的 APFS 直接返回 `EILSEQ`，
+    /// Windows 的文件名本就是 UTF-16。返回 `None` 表示当前平台造不出来，
+    /// 由调用方跳过该场景，而不是让测试失败。
+    #[cfg(unix)]
+    fn write_non_utf8_note(dir: &Path) -> Option<PathBuf> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = dir.join(OsStr::from_bytes(b"\xff\xfe.md"));
+        fs::write(&path, "# bad\n").ok().map(|()| path)
+    }
+
+    #[cfg(not(unix))]
+    fn write_non_utf8_note(_dir: &Path) -> Option<PathBuf> {
+        None
     }
 
     #[test]

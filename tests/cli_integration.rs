@@ -17,7 +17,10 @@ fn command_for(temp: &TempDir) -> Command {
     fs::create_dir_all(&appdata).expect("创建 appdata");
     fs::create_dir_all(&home).expect("创建 home");
 
-    cmd.env("APPDATA", &appdata)
+    // GG_CONFIG_DIR 是显式覆盖，优先级高于平台 API：否则 Windows 上
+    // dirs 走 SHGetKnownFolderPath、macOS 走 ~/Library，测试目录根本不被采用。
+    cmd.env("GG_CONFIG_DIR", &appdata)
+        .env("APPDATA", &appdata)
         .env("XDG_CONFIG_HOME", &appdata)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
@@ -37,50 +40,33 @@ fn write_note(notes_dir: &Path, command: &str, markdown: &str) {
     fs::write(notes_dir.join(format!("{command}.md")), markdown).expect("写入笔记");
 }
 
-#[cfg(unix)]
-fn create_fake_claude(temp: &TempDir) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
+/// 写一个可执行的假工具脚本，返回其路径。
+///
+/// 两处平台差异容易漏，统一在这里处理：
+/// - Windows 的可执行文件必须带 `.cmd` / `.exe` 之类扩展名，
+///   `CreateProcess` 不会执行一个无扩展名的文件（连 `which` 也找不到）；
+/// - Unix 上需要补可执行位。
+fn write_fake_tool(temp: &TempDir, name: &str, unix_body: &str, windows_body: &str) -> PathBuf {
+    let path = if cfg!(windows) {
+        temp.path().join(format!("{name}.cmd"))
+    } else {
+        temp.path().join(name)
+    };
+    let body = if cfg!(windows) {
+        windows_body
+    } else {
+        unix_body
+    };
+    fs::write(&path, body).unwrap_or_else(|err| panic!("写假工具 {}: {err}", path.display()));
 
-    // `--version` 探测不写标记；标记存在即代表真的走到了生成路径。
-    // `GG_TEST_HANG` 用于验证ai_timeout_seconds 能终止不返回的子进程。
-    let path = temp.path().join("fake-claude");
-    // 模拟真实模型输出：以人手会写坏习惯的 `# 标题` 开头，用来验证会被剥离。
-    let script = "#!/bin/sh\n\
-                  if [ \"$1\" = \"--version\" ]; then echo 'claude 0.0.1'; exit 0; fi\n\
-                  if [ -n \"$GG_TEST_HANG\" ]; then sleep 30; exit 0; fi\n\
-                  if [ -n \"$GG_TEST_MARKER\" ]; then echo called >> \"$GG_TEST_MARKER\"; fi\n\
-                  echo '# foo 命令速查'\n\
-                  echo ''\n\
-                  echo '`foo`：测试用命令。'\n\
-                  echo ''\n\
-                  echo '- `-x`：测试选项'\n";
-    fs::write(&path, script).expect("写入假 claude 脚本");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).expect("stat 假工具").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("chmod 假工具");
+    }
 
-    let mut perms = fs::metadata(&path).expect("stat 假 claude").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).expect("设置可执行位");
-    path
-}
-
-#[cfg(windows)]
-fn create_fake_claude(temp: &TempDir) -> PathBuf {
-    let path = temp.path().join("fake-claude.cmd");
-    let script = "@echo off\r\n\
-                  if \"%1\"==\"--version\" (\r\n\
-                    echo claude 0.0.1\r\n\
-                    exit /b 0\r\n\
-                  )\r\n\
-                  if not \"%GG_TEST_HANG%\"==\"\" (\r\n\
-                    ping -n 30 127.0.0.1 >nul\r\n\
-                    exit /b 0\r\n\
-                  )\r\n\
-                  if not \"%GG_TEST_MARKER%\"==\"\" echo called >> \"%GG_TEST_MARKER%\"\r\n\
-                  echo # foo 命令速查\r\n\
-                  echo.\r\n\
-                  echo `foo`：测试用命令。\r\n\
-                  echo.\r\n\
-                  echo - `-x`：测试选项\r\n";
-    fs::write(&path, script).expect("写入假 claude 脚本");
     path
 }
 
@@ -90,33 +76,46 @@ fn write_config(temp: &TempDir, body: &str) {
     fs::write(config_dir.join("config.toml"), body).expect("写入配置");
 }
 
+/// 假 claude：`--version` 不写标记，标记存在即代表真的走到了生成路径。
+/// `GG_TEST_HANG` 用于验证 ai_timeout_seconds 能终止不返回的子进程；
+/// 输出以 `# 标题` 开头，用来验证首行标题会被剥离。
+fn create_fake_claude(temp: &TempDir) -> PathBuf {
+    write_fake_tool(
+        temp,
+        "fake-claude",
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"--version\" ]; then echo 'claude 0.0.1'; exit 0; fi\n\
+         if [ -n \"$GG_TEST_HANG\" ]; then sleep 30; exit 0; fi\n\
+         if [ -n \"$GG_TEST_MARKER\" ]; then echo called >> \"$GG_TEST_MARKER\"; fi\n\
+         echo '# foo cheatsheet'\n\
+         echo ''\n\
+         echo 'foo: test command.'\n\
+         echo ''\n\
+         echo '- -x: test option'\n",
+        "@echo off\r\n\
+         if \"%1\"==\"--version\" (\r\n echo claude 0.0.1\r\n exit /b 0\r\n )\r\n\
+         if not \"%GG_TEST_HANG%\"==\"\" (\r\n ping -n 30 127.0.0.1 >nul\r\n exit /b 0\r\n )\r\n\
+         if not \"%GG_TEST_MARKER%\"==\"\" echo called >> \"%GG_TEST_MARKER%\"\r\n\
+         echo # foo cheatsheet\r\n echo.\r\n echo foo: test command.\r\n echo.\r\n echo - -x: test option\r\n",
+    )
+}
+
 /// 创建一个会记录自己 argv 的假 AI 工具，返回 (可执行文件, argv 记录文件)。
 fn fake_ai_tool(temp: &TempDir, name: &str) -> (PathBuf, PathBuf) {
     let record = temp.path().join(format!("{name}-argv.txt"));
-    let bin = temp.path().join(name);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // 先记录 argv，再输出一段合法笔记正文，避免被判为「AI 返回空内容」。
-        let body = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\necho '`foo`：测试用命令。'\n",
+    let bin = write_fake_tool(
+        temp,
+        name,
+        // 先记录 argv，再输出一段合法笔记正文，避免被判为「AI 返回空内容」
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\necho 'foo: test command.'\n",
             record.display()
-        );
-        fs::write(&bin, body).expect("写假 AI 工具");
-        let mut perms = fs::metadata(&bin).expect("stat").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&bin, perms).expect("chmod");
-    }
-    #[cfg(windows)]
-    {
-        let body = format!(
-            "@echo off\r\necho %* >> \"{}\"\r\necho `foo`：测试用命令。\r\n",
+        ),
+        &format!(
+            "@echo off\r\necho %* >> \"{}\"\r\necho foo: test command.\r\n",
             record.display()
-        );
-        fs::write(&bin, body).expect("写假 AI 工具");
-    }
-
+        ),
+    );
     (bin, record)
 }
 
@@ -254,19 +253,12 @@ fn edit_notifies_when_it_creates_an_empty_note() {
     fs::create_dir_all(&notes_dir).expect("创建笔记目录");
 
     // 用假编辑器，避开真实编辑器的交互阻塞。
-    let editor = temp.path().join("noop-editor");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::write(&editor, "#!/bin/sh\nexit 0\n").expect("写假编辑器");
-        let mut perms = fs::metadata(&editor).expect("stat").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&editor, perms).expect("chmod");
-    }
-    #[cfg(windows)]
-    {
-        fs::write(&editor, "@echo off\r\nexit /b 0\r\n").expect("写假编辑器");
-    }
+    let editor = write_fake_tool(
+        &temp,
+        "noop-editor",
+        "#!/bin/sh\nexit 0\n",
+        "@echo off\r\nexit /b 0\r\n",
+    );
 
     let mut cmd = command_for(&temp);
     cmd.env("GG_EDITOR", &editor);
@@ -289,19 +281,12 @@ fn edit_does_not_claim_creation_for_an_existing_note() {
     let notes_dir = temp.path().join("notes");
     write_note(&notes_dir, "ls", "# ls\n");
 
-    let editor = temp.path().join("noop-editor");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::write(&editor, "#!/bin/sh\nexit 0\n").expect("写假编辑器");
-        let mut perms = fs::metadata(&editor).expect("stat").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&editor, perms).expect("chmod");
-    }
-    #[cfg(windows)]
-    {
-        fs::write(&editor, "@echo off\r\nexit /b 0\r\n").expect("写假编辑器");
-    }
+    let editor = write_fake_tool(
+        &temp,
+        "noop-editor",
+        "#!/bin/sh\nexit 0\n",
+        "@echo off\r\nexit /b 0\r\n",
+    );
 
     let mut cmd = command_for(&temp);
     cmd.env("GG_EDITOR", &editor);
@@ -330,21 +315,12 @@ fn missing_configured_editor_falls_through_to_env_editor() {
     write_note(&notes_dir, "ls", "# ls\n");
 
     let marker = temp.path().join("env-editor-ran");
-    let env_editor = temp.path().join("env-editor");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let body = format!("#!/bin/sh\necho \"$1\" > {}\n", marker.display());
-        fs::write(&env_editor, body).expect("写假编辑器");
-        let mut perms = fs::metadata(&env_editor).expect("stat").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&env_editor, perms).expect("chmod");
-    }
-    #[cfg(windows)]
-    {
-        let body = format!("@echo off\r\necho %1 > \"{}\"\r\n", marker.display());
-        fs::write(&env_editor, body).expect("写假编辑器");
-    }
+    let env_editor = write_fake_tool(
+        &temp,
+        "env-editor",
+        &format!("#!/bin/sh\necho \"$1\" > {}\n", marker.display()),
+        &format!("@echo off\r\necho %1 > \"{}\"\r\n", marker.display()),
+    );
 
     write_config(
         &temp,
@@ -379,19 +355,12 @@ fn failing_editor_is_reported_instead_of_silently_falling_back() {
     let notes_dir = temp.path().join("notes");
     write_note(&notes_dir, "ls", "# ls\n");
 
-    let editor = temp.path().join("failing-editor");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::write(&editor, "#!/bin/sh\nexit 3\n").expect("写假编辑器");
-        let mut perms = fs::metadata(&editor).expect("stat").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&editor, perms).expect("chmod");
-    }
-    #[cfg(windows)]
-    {
-        fs::write(&editor, "@echo off\r\nexit /b 3\r\n").expect("写假编辑器");
-    }
+    let editor = write_fake_tool(
+        &temp,
+        "failing-editor",
+        "#!/bin/sh\nexit 3\n",
+        "@echo off\r\nexit /b 3\r\n",
+    );
 
     let mut cmd = command_for(&temp);
     cmd.env("GG_EDITOR", &editor);
@@ -459,6 +428,9 @@ fn yes_flag_is_documented_in_help() {
 }
 
 /// 单个条目读不了时，列表必须仍然输出，并在 stderr 告知结果可能不完整。
+///
+/// 靠「文件名不是合法 UTF-8」制造不可读条目。macOS 的 APFS 会直接拒绝这种
+/// 名字（EILSEQ），造不出来时跳过该场景。
 #[cfg(unix)]
 #[test]
 fn list_survives_unreadable_entry_and_warns() {
@@ -468,7 +440,10 @@ fn list_survives_unreadable_entry_and_warns() {
     let temp = TempDir::new().expect("tempdir");
     let notes_dir = temp.path().join("notes");
     write_note(&notes_dir, "ls", "# ls\n");
-    fs::write(notes_dir.join(OsStr::from_bytes(b"\xff\xfe.md")), "# bad\n").expect("写非法文件名");
+    if fs::write(notes_dir.join(OsStr::from_bytes(b"\xff\xfe.md")), "# bad\n").is_err() {
+        eprintln!("[跳过] 当前文件系统不接受非 UTF-8 文件名");
+        return;
+    }
 
     let mut cmd = command_for(&temp);
     cmd.args(["--notes-dir", notes_dir.to_str().expect("utf8"), "list"]);
@@ -498,7 +473,7 @@ fn unsaved_generated_note_is_still_printed() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("`foo`：测试用命令。"))
+        .stdout(predicate::str::contains("foo: test command."))
         .stderr(predicate::str::contains("已跳过保存"));
 
     assert!(!notes_dir.join("foo.md").exists());
@@ -646,19 +621,12 @@ fn show_supports_the_edit_flag() {
     let notes_dir = temp.path().join("notes");
     write_note(&notes_dir, "rm", "# rm\n");
 
-    let editor = temp.path().join("noop-editor");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::write(&editor, "#!/bin/sh\nexit 0\n").expect("写假编辑器");
-        let mut perms = fs::metadata(&editor).expect("stat").permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&editor, perms).expect("chmod");
-    }
-    #[cfg(windows)]
-    {
-        fs::write(&editor, "@echo off\r\nexit /b 0\r\n").expect("写假编辑器");
-    }
+    let editor = write_fake_tool(
+        &temp,
+        "noop-editor",
+        "#!/bin/sh\nexit 0\n",
+        "@echo off\r\nexit /b 0\r\n",
+    );
 
     let mut cmd = command_for(&temp);
     cmd.env("GG_EDITOR", &editor);
@@ -750,7 +718,7 @@ fn custom_ai_command_takes_precedence_over_preset() {
     );
     // 提示词作为最后一个参数追加，且必须是优化后的新提示词
     assert!(
-        argv.contains("10~25 行"),
+        argv.contains("10~25"),
         "应使用简洁版提示词，实际 argv:\n{argv}"
     );
     assert!(
@@ -943,12 +911,12 @@ fn ai_opt_out_allows_non_interactive_generation() {
     assert!(marker.exists(), "显式选择后应当调用 claude");
     let saved = fs::read_to_string(notes_dir.join("foo.md")).expect("笔记应已保存");
     assert!(
-        saved.contains("`foo`：测试用命令。"),
+        saved.contains("foo: test command."),
         "实际:
 {saved}"
     );
     assert!(
-        !saved.contains("# foo 命令速查"),
+        !saved.contains("# foo cheatsheet"),
         "模型加的首行标题应被剥离，实际:
 {saved}"
     );
