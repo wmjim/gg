@@ -18,6 +18,7 @@
 - AI 回退：未命中时检测 `claude`，可询问后生成并保存
 - 浏览器渲染：`--browser` 在浏览器中打开 Markdown
 - 编辑笔记：`--edit` 用默认编辑器打开笔记
+- 界面语言：`zh` / `en`，帮助信息与所有提示均本地化
 
 ## 安装与构建
 
@@ -43,23 +44,32 @@ cargo build --release
 - Windows: `target/release/gg.exe`
 - Linux/macOS: `target/release/gg`
 
+发布构建已启用 `lto` / `codegen-units = 1` / `strip` / `panic = "abort"`。
+
 ## glow 渲染
 
 `gg` 优先调用 `glow` 在终端渲染 Markdown。
 
 - 默认执行：`glow -`
 - 未安装 `glow` 或调用失败时，自动回退为原始 Markdown 输出
-- 可通过 `GG_GLOW_BIN` 指定 `glow` 路径
+- 可通过 `GG_GLOW_BIN` 指定 `glow` 路径，**支持携带参数**
 
 示例：
 
 ```bash
 # Linux/macOS
 export GG_GLOW_BIN=/usr/local/bin/glow
+export GG_GLOW_BIN="glow -s dark -w 80"
 
 # PowerShell
-$env:GG_GLOW_BIN = "C:\\Tools\\glow.exe"
+$env:GG_GLOW_BIN = "C:\Tools\glow.exe"
 ```
+
+`GG_GLOW_BIN` 的解析规则（编辑器配置同理）：
+
+1. 先把整个字符串当作路径解析 —— 保护 `C:\Program Files\glow.exe` 这类含空格的绝对路径
+2. 含路径分隔符时按「最长前缀」逐段合并 —— 支持 `/opt/my tools/ed -w` 这种未加引号的写法
+3. 最后按 shell 词法切分 —— 支持 `glow -s dark`、`"'/opt/my editor' -p"`
 
 ## 默认笔记目录
 
@@ -98,20 +108,38 @@ gg list
 gg search gre
 ```
 
+## 退出码
+
+| 退出码 | 含义 |
+|--------|------|
+| 0 | 成功（命中笔记 / `--edit` 打开 / AI 成功生成） |
+| 1 | 运行时错误（配置非法、文件不可写等，stderr 有完整原因） |
+| 2 | 命令行用法错误（clap 输出） |
+| 3 | 未命中笔记且没有可用的替代内容 |
+
+退出码 3 让脚本可以直接判断：
+
+```bash
+gg foo > /dev/null 2>&1 || echo "还没写过 foo 的笔记"
+```
+
 ## 配置文件
 
 - Linux/macOS: `~/.config/gg/config.toml`
 - Windows: `%APPDATA%\gg\config.toml`
 
 ```toml
-ask_before_ai = true
-auto_save_ai = true
-ask_before_save = false
+ask_before_ai = true      # 调用 AI 前是否询问
+auto_save_ai = true       # AI 生成后是否落盘
+ask_before_save = false   # 落盘前是否再询问一次
 ai_note_language = "zh-CN"
-ai_provider = "claude"
-editor = "vim"        # 可选：设置默认编辑器
-language = "zh"      # 可选：设置显示语言 (zh/en)
+ai_provider = "claude"    # 当前仅支持 claude
+editor = "hx"             # 可选：默认编辑器，支持带参数，如 "code -w"
+language = "zh"           # 可选：显示语言 (zh/en)
 ```
+
+配置项类型是强校验的：`language = "jp"`、`ai_provider = "openai"` 会在启动时直接报错并指出问题所在文件，
+而不是静默降级成英文或跳过 AI。
 
 ## Claude 回退说明
 
@@ -125,12 +153,22 @@ language = "zh"      # 可选：设置显示语言 (zh/en)
 
 可通过 `GG_CLAUDE_BIN` 指定 Claude 可执行文件路径。
 
-## 注意事项
+### 非交互终端的保护策略
 
-- v1 仅支持“单词命令名”（不能含空格）
-- 命令名不能包含 `/`、`\`、`:`
-- 仅支持 `.md` 笔记文件
-- `list`、`search`、`help` 是子命令名，不能作为普通查询命令名直接使用
+`ask_before_ai = true`（默认）意味着「必须先经我确认」，而确认依赖交互终端。
+因此在 `stdout` 被管道或重定向接管时，**不会**静默调用 AI，也不会写入笔记目录：
+
+```bash
+gg foo | less        # 提示「非交互终端，已跳过 AI 回退」，退出码 3
+gg foo > out.md      # 同上，不会意外改写 ~/.config/gg/notes/
+```
+
+如果你确认要在脚本里自动生成，把确认关掉即可显式授权：
+
+```toml
+ask_before_ai = false
+auto_save_ai = true
+```
 
 ## 浏览器渲染
 
@@ -140,9 +178,14 @@ language = "zh"      # 可选：设置显示语言 (zh/en)
 gg --browser ls
 ```
 
-该模式会把 Markdown 转成 HTML 并用系统默认浏览器打开。
+该模式会把 Markdown 转成 HTML 并用系统默认浏览器打开。HTML 模板位于
+`src/assets/note_template.html`，可直接编辑而无需改 Rust 代码。
 
-**WSL 支持**：在 WSL 环境下会自动转换路径并通过 `wslview`、`powershell.exe`、`cmd.exe` 等方式打开 Windows 默认浏览器。
+渲染产物写入 `<系统临时目录>/gg/`，每次渲染前会清理其中超过 24 小时的旧文件
+（浏览器是异步读取的，渲染结束后不能立刻删除）。
+
+**WSL 支持**：在 WSL 环境下会自动转换路径，并依次尝试 `wslview`、`powershell.exe`、
+`pwsh.exe`、`cmd.exe`、`explorer.exe` 以及它们在 `/mnt/c/...` 下的绝对路径。
 
 ## 编辑笔记
 
@@ -152,15 +195,15 @@ gg --browser ls
 gg --edit ls
 ```
 
-编辑器优先级：`config.editor` > `GG_EDITOR` > `VISUAL` > `EDITOR`。
+编辑器优先级：`config.editor` > `GG_EDITOR` > `VISUAL` > `EDITOR` > 终端编辑器
+（`nvim` > `vim` > `vi` > `hx` > `helix` > `nano`）> 系统默认程序。
 
 可用 `--set-editor` 设置默认编辑器并保存到配置：
 
 ```bash
 gg --set-editor vim
+gg --set-editor "code -w"
 ```
-
-**WSL 支持**：在 WSL 环境下优先使用终端编辑器（nvim > vim > vi > helix > nano），未找到时会通过 `wslview` 或 `powershell.exe` 打开 Windows 编辑器。
 
 ## 设置默认语言
 
@@ -170,9 +213,67 @@ gg --set-editor vim
 gg --lang en
 ```
 
+`gg --lang en --help` 会立即以英文输出帮助，无需先落盘配置。
+
+## 排查问题
+
+设置 `GG_DEBUG=1` 可输出带时间戳与调用点上下文的调试日志，
+用于定位「候选程序一个都没成功」这类多级回退问题：
+
+```bash
+GG_DEBUG=1 gg --browser ls
+```
+
+```text
+[DEBUG] 2026-09-19T04:34:09Z platform::open_native: `gnome-open` 不在 PATH 中, 跳过
+[DEBUG] 2026-09-19T04:34:09Z platform::open_native: 已通过 `xdg-open` 打开 /tmp/gg/gg-render-xxx.html (target="浏览器")
+```
+
+## 项目结构
+
+```text
+src/
+  main.rs           进程入口：探测语言 → 解析参数 → 分派
+  lib.rs            模块导出
+  cli.rs            clap 定义 + 本地化帮助
+  app.rs            应用编排层 / QueryService（依赖注入）
+  config.rs         配置模型、路径解析（强类型枚举）
+  i18n.rs           中英文案唯一来源
+  notes.rs          笔记仓储层（读写、列举、模糊建议）
+  render.rs         Markdown 渲染（终端 glow / 浏览器）
+  editor.rs         编辑器启动与回退链
+  ai.rs             Claude 笔记生成
+  prompt.rs         交互提示端口
+  utils/
+    process.rs      可执行命令字符串解析
+    platform.rs     跨平台「打开路径」（含 WSL 互操作）
+  assets/
+    note_template.html   浏览器渲染模板
+tests/
+  cli_integration.rs  端到端 CLI 测试（跨平台）
+```
+
+分层约定：`app.rs` 只做编排，通过 `render` / `editor` / `ai` / `prompt` 四个 trait
+注入依赖；业务规则放在 `QueryService`，因此可以脱离真实进程与终端做单测。
+
 ## 测试
 
 ```bash
-cargo test
+cargo test                 # 单元测试 + 集成测试
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
 ```
 
+CI（`.github/workflows/ci.yml`）在 ubuntu / macos / windows 三个平台跑完整测试矩阵，
+并单独一个 job 跑 `fmt` + `clippy -D warnings`。
+
+## 注意事项
+
+- v1 仅支持「单词命令名」（不能含空格）
+- 命令名不能包含 `/`、`\`、`:`
+- 仅支持 `.md` 笔记文件
+- `list`、`search`、`help` 是子命令名，不能作为普通查询命令名直接使用
+
+## License
+
+MIT，见 [LICENSE](LICENSE)。
