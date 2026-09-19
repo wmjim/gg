@@ -98,7 +98,7 @@ pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
                     .iter()
                     .map(notes::ContentMatch::render)
                     .collect::<Vec<_>>();
-                output::write_lines(io::stdout().lock(), lines)?;
+                output::write_lines(io::stdout().lock(), lines, lang)?;
             } else {
                 let found = notes::search_commands_by_name(&notes_dir, &keyword, lang)?;
                 warn_skipped(&found.skipped, lang);
@@ -169,13 +169,13 @@ fn print_help(lang: Language) -> Result<()> {
 ///
 /// 只在 stdout 是终端时排成多列（对齐 `ls` 的行为），管道与重定向仍为
 /// 每行一条，保证 `gg list | grep x` 这类脚本不受影响。
-fn write_commands(commands: &[String], _lang: Language) -> Result<()> {
+fn write_commands(commands: &[String], lang: Language) -> Result<()> {
     let stdout = io::stdout();
     if stdout.is_terminal() {
         let rendered = layout::format_columns(commands, terminal_width());
-        return output::write_text(stdout.lock(), &rendered);
+        return output::write_text(stdout.lock(), &rendered, lang);
     }
-    output::write_lines(stdout.lock(), commands.to_vec())
+    output::write_lines(stdout.lock(), commands.to_vec(), lang)
 }
 
 /// 终端宽度：没有可靠的跨平台 std API，只能用 `COLUMNS`，否则按 80 列。

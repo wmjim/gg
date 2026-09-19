@@ -313,9 +313,77 @@ impl Language {
             zh: "无法确定系统配置目录",
             en: "Cannot determine the system config directory",
         },
-        stdout_write_failed(err: &str) => {
-            zh: "无法写入标准输出: {err}",
-            en: "Failed to write to stdout: {err}",
+        stdout_write_failed() => {
+            zh: "无法写入标准输出",
+            en: "Failed to write to stdout",
+        },
+        temp_dir_create_failed(path: &str) => {
+            zh: "无法创建临时目录: {path}",
+            en: "Failed to create the temporary directory: {path}",
+        },
+        temp_file_create_failed() => {
+            zh: "无法创建临时文件",
+            en: "Failed to create the temporary file",
+        },
+        temp_file_write_failed(path: &str) => {
+            zh: "无法写入临时文件: {path}",
+            en: "Failed to write the temporary file: {path}",
+        },
+        temp_file_flush_failed(path: &str) => {
+            zh: "无法刷新临时文件: {path}",
+            en: "Failed to flush the temporary file: {path}",
+        },
+        temp_file_keep_failed() => {
+            zh: "无法保留临时文件",
+            en: "Failed to keep the temporary file",
+        },
+        program_spawn_failed(program: &str) => {
+            zh: "无法启动 `{program}`",
+            en: "Failed to start `{program}`",
+        },
+        program_invoke_failed(program: &str) => {
+            zh: "无法调用 `{program}`",
+            en: "Failed to invoke `{program}`",
+        },
+        glow_wait_failed() => {
+            zh: "无法等待 glow 退出",
+            en: "Failed to wait for glow to exit",
+        },
+        glow_stdin_write_failed(err: &str) => {
+            zh: "写入 stdin 失败: {err}",
+            en: "Failed to write to stdin: {err}",
+        },
+        glow_exit_code(status: &str, detail: &str) => {
+            zh: "glow 退出码 {status}（参数: -）{detail}",
+            en: "glow exited with {status} (stdin mode) {detail}",
+        },
+        glow_file_exit_code(status: &str, path: &str) => {
+            zh: "glow 退出码 {status}（文件: {path}）",
+            en: "glow exited with {status} (file: {path})",
+        },
+        glow_modes_failed(stdin_err: &str, file_err: &str) => {
+            zh: "stdin 模式失败：{stdin_err}; 文件模式失败：{file_err}",
+            en: "stdin mode failed: {stdin_err}; file mode failed: {file_err}",
+        },
+        ai_disabled_generation() => {
+            zh: "AI 回退已关闭",
+            en: "AI fallback is disabled",
+        },
+        ai_wait_failed() => {
+            zh: "无法等待 AI 命令退出",
+            en: "Failed to wait for the AI command to exit",
+        },
+        ai_exit_code(code: &str) => {
+            zh: "退出码 {code}",
+            en: "exit code {code}",
+        },
+        ai_exit_code_with_stderr(code: &str, stderr: &str) => {
+            zh: "退出码 {code}: {stderr}",
+            en: "exit code {code}: {stderr}",
+        },
+        editor_exit_code(code: &str) => {
+            zh: "编辑器退出码 {code}",
+            en: "editor exited with {code}",
         },
         remove_needs_a_target() => {
             zh: "需要指定至少一个要删除的命令名",

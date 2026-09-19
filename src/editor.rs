@@ -84,11 +84,11 @@ impl EditorLauncher for SystemEditor {
 
 fn try_editor(spec: &str, path: &Path, lang: Language) -> std::result::Result<(), EditorFailure> {
     let program = resolve_program(spec, lang).map_err(EditorFailure::NotInstalled)?;
-    run_editor(&program, path).map_err(EditorFailure::RunFailed)
+    run_editor(&program, path, lang).map_err(EditorFailure::RunFailed)
 }
 
 /// 启动编辑器并等待其退出（编辑场景必须阻塞到用户保存完成）。
-fn run_editor(program: &Program, path: &Path) -> Result<()> {
+fn run_editor(program: &Program, path: &Path, lang: Language) -> Result<()> {
     debug_log!(
         "editor::run_editor: 启动 `{}`, args={:?}, path={}",
         program.bin.display(),
@@ -102,14 +102,14 @@ fn run_editor(program: &Program, path: &Path) -> Result<()> {
         .command()
         .arg(path)
         .status()
-        .with_context(|| format!("无法启动 `{}`", program.describe()))?;
+        .with_context(|| lang.program_spawn_failed(&program.describe()))?;
 
     if !status.success() {
         let code = status
             .code()
             .map(|code| code.to_string())
             .unwrap_or_else(|| "signal".to_string());
-        bail!("编辑器退出码 {code}");
+        bail!("{}", lang.editor_exit_code(&code));
     }
     Ok(())
 }

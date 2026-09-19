@@ -62,20 +62,25 @@ impl MarkdownRenderer {
 
     fn render_to_browser(&self, markdown: &str, command: &str) -> Result<()> {
         let html = convert_md_to_html(markdown, self.lang, command);
-        let dir = browser_cache_dir()?;
+        let dir = browser_cache_dir(self.lang)?;
         prune_stale_render_files(&dir, STALE_RENDER_MAX_AGE);
 
         let mut file = tempfile::Builder::new()
             .prefix("gg-render-")
             .suffix(".html")
             .tempfile_in(&dir)
-            .with_context(|| format!("无法在 {} 创建临时 HTML 文件", dir.display()))?;
-        file.write_all(html.as_bytes())
-            .context("无法写入临时 HTML 文件")?;
-        file.flush().context("无法刷新临时 HTML 文件")?;
+            .with_context(|| self.lang.temp_file_create_failed())?;
+        file.write_all(html.as_bytes()).with_context(|| {
+            self.lang
+                .temp_file_write_failed(&file.path().display().to_string())
+        })?;
+        file.flush().with_context(|| {
+            self.lang
+                .temp_file_flush_failed(&file.path().display().to_string())
+        })?;
 
         // 浏览器异步读取，临时文件不能在这里删除，交给后续的定期清理回收。
-        let (_file, path) = file.keep().context("无法保留临时 HTML 文件")?;
+        let (_file, path) = file.keep().context(self.lang.temp_file_keep_failed())?;
         debug_log!(
             "render::render_to_browser: markdown {} 字节 -> {}",
             markdown.len(),
@@ -96,19 +101,27 @@ impl MarkdownRenderer {
         let program =
             resolve_program(&spec, self.lang).with_context(|| self.lang.glow_not_found(&spec))?;
 
-        match run_glow_via_stdin(&program, markdown) {
+        match run_glow_via_stdin(&program, markdown, self.lang) {
             Ok(()) => Ok(()),
             Err(stdin_err) => {
                 debug_log!("render::render_with_glow: stdin 模式失败: {stdin_err}, 回退文件模式");
-                run_glow_via_file(&program, markdown).map_err(|file_err| {
-                    anyhow::anyhow!("stdin 模式失败：{stdin_err}; 文件模式失败：{file_err}")
+                run_glow_via_file(&program, markdown, self.lang).map_err(|file_err| {
+                    anyhow::anyhow!(
+                        "{}",
+                        self.lang
+                            .glow_modes_failed(&stdin_err.to_string(), &file_err.to_string())
+                    )
                 })
             }
         }
     }
 }
 
-fn run_glow_via_stdin(program: &crate::utils::process::Program, markdown: &str) -> Result<()> {
+fn run_glow_via_stdin(
+    program: &crate::utils::process::Program,
+    markdown: &str,
+    lang: Language,
+) -> Result<()> {
     let mut child = program
         .command()
         .arg("-")
@@ -116,7 +129,7 @@ fn run_glow_via_stdin(program: &crate::utils::process::Program, markdown: &str) 
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()
-        .with_context(|| format!("无法启动 `{}`", program.describe()))?;
+        .with_context(|| lang.program_spawn_failed(&program.describe()))?;
 
     // glow 可能在读完输入前就退出（例如参数错误），此时 write_all 会得到 EPIPE。
     // 必须无论如何都等到退出并回收，否则要么留下僵尸进程，
@@ -126,7 +139,7 @@ fn run_glow_via_stdin(program: &crate::utils::process::Program, markdown: &str) 
         Some(mut stdin) => stdin.write_all(markdown.as_bytes()),
         None => Ok(()),
     };
-    let status = child.wait().context("无法等待 glow 退出")?;
+    let status = child.wait().context(lang.glow_wait_failed())?;
 
     if let Err(err) = &write_result {
         debug_log!("render::run_glow_via_stdin: 写入 stdin 失败: {err}");
@@ -138,20 +151,25 @@ fn run_glow_via_stdin(program: &crate::utils::process::Program, markdown: &str) 
 
     let detail = match write_result {
         Ok(()) => String::new(),
-        Err(err) => format!("（写入 stdin 失败: {err}）"),
+        Err(err) => format!("（{}）", lang.glow_stdin_write_failed(&err.to_string())),
     };
-    bail!("glow 退出码 {status}（参数: -）{detail}")
+    bail!("{}", lang.glow_exit_code(&status.to_string(), &detail))
 }
 
-fn run_glow_via_file(program: &crate::utils::process::Program, markdown: &str) -> Result<()> {
+fn run_glow_via_file(
+    program: &crate::utils::process::Program,
+    markdown: &str,
+    lang: Language,
+) -> Result<()> {
     let mut file = tempfile::Builder::new()
         .prefix("gg-render-")
         .suffix(".md")
         .tempfile()
-        .context("无法创建临时 Markdown 文件")?;
+        .context(lang.temp_file_create_failed())?;
     file.write_all(markdown.as_bytes())
-        .context("无法写入临时 Markdown 文件")?;
-    file.flush().context("无法刷新临时 Markdown 文件")?;
+        .with_context(|| lang.temp_file_write_failed(&file.path().display().to_string()))?;
+    file.flush()
+        .with_context(|| lang.temp_file_flush_failed(&file.path().display().to_string()))?;
 
     // NamedTempFile 在作用域结束时自动删除，无需手工 remove_file。
     let status = program
@@ -160,12 +178,12 @@ fn run_glow_via_file(program: &crate::utils::process::Program, markdown: &str) -
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .with_context(|| format!("无法启动 `{}`", program.describe()))?;
+        .with_context(|| lang.program_spawn_failed(&program.describe()))?;
 
     anyhow::ensure!(
         status.success(),
-        "glow 退出码 {status}（文件: {}）",
-        file.path().display()
+        "{}",
+        lang.glow_file_exit_code(&status.to_string(), &file.path().display().to_string())
     );
     Ok(())
 }
@@ -178,9 +196,10 @@ fn glow_bin() -> String {
 }
 
 /// 浏览器渲染产物集中目录；不再把临时文件散落在系统临时目录根部。
-fn browser_cache_dir() -> Result<PathBuf> {
+fn browser_cache_dir(lang: Language) -> Result<PathBuf> {
     let dir = std::env::temp_dir().join("gg");
-    fs::create_dir_all(&dir).with_context(|| format!("无法创建临时目录 {}", dir.display()))?;
+    fs::create_dir_all(&dir)
+        .with_context(|| lang.temp_dir_create_failed(&dir.display().to_string()))?;
     Ok(dir)
 }
 
@@ -336,8 +355,8 @@ fn print_raw(markdown: &str, lang: Language) {
         format!("{markdown}\n")
     };
 
-    if let Err(err) = crate::utils::output::write_text(io::stdout().lock(), &text) {
-        eprintln!("{}", lang.stdout_write_failed(&format!("{err:#}")));
+    if let Err(err) = crate::utils::output::write_text(io::stdout().lock(), &text, lang) {
+        eprintln!("{err:#}");
     }
 }
 

@@ -28,7 +28,15 @@ pub trait NoteGenerator {
 }
 
 /// 配置为 `ai_provider = "none"` 时的空实现。
-pub struct DisabledGenerator;
+pub struct DisabledGenerator {
+    lang: Language,
+}
+
+impl DisabledGenerator {
+    pub fn new(lang: Language) -> Self {
+        Self { lang }
+    }
+}
 
 impl NoteGenerator for DisabledGenerator {
     fn description(&self) -> String {
@@ -40,7 +48,7 @@ impl NoteGenerator for DisabledGenerator {
     }
 
     fn generate(&self, _command: &str, _language: &str) -> Result<String> {
-        bail!("AI 回退已关闭")
+        bail!("{}", self.lang.ai_disabled_generation())
     }
 }
 
@@ -110,7 +118,7 @@ impl AiNoteGenerator {
         invocation: &AiInvocation,
     ) -> Box<dyn NoteGenerator> {
         match invocation {
-            AiInvocation::Disabled => Box::new(DisabledGenerator),
+            AiInvocation::Disabled => Box::new(DisabledGenerator::new(lang)),
             AiInvocation::Command(spec) => Box::new(Self {
                 lang,
                 timeout,
@@ -161,7 +169,7 @@ impl NoteGenerator for AiNoteGenerator {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .with_context(|| format!("无法调用 `{}`", ai_command.describe()))?;
+            .with_context(|| self.lang.program_invoke_failed(&ai_command.describe()))?;
 
         let stdout = child
             .stdout
@@ -178,7 +186,7 @@ impl NoteGenerator for AiNoteGenerator {
 
         let status = match self.timeout {
             Some(timeout) => wait_with_timeout(&mut child, timeout)?,
-            None => Some(child.wait().context("无法等待 AI 命令退出")?),
+            None => Some(child.wait().context(self.lang.ai_wait_failed())?),
         };
 
         // 超时时直接返回，不 join 读取线程：被杀的只是直接子进程，留下的
@@ -202,9 +210,9 @@ impl NoteGenerator for AiNoteGenerator {
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "signal".to_string());
             let detail = if stderr_text.is_empty() {
-                format!("退出码 {code}")
+                self.lang.ai_exit_code(&code)
             } else {
-                format!("退出码 {code}: {stderr_text}")
+                self.lang.ai_exit_code_with_stderr(&code, &stderr_text)
             };
             bail!("{}", self.lang.ai_failed(&detail));
         }
