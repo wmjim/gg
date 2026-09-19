@@ -25,6 +25,12 @@
             --shadow-soft: rgba(0, 0, 0, 0.18);
             --zebra: rgba(255, 255, 255, 0.016);
             --hover: rgba(255, 180, 84, 0.06);
+            /* 代码高亮：只用 3 个新色相，其余复用已有变量，
+               整体维持在「琥珀 + 少量冷色」的克制范围内 */
+            --tok-str: #a8cd8f;
+            --tok-var: #7cc9c1;
+            --tok-kw: #cba6dc;
+            --tok-num: #c8893a;
         }
         @media (prefers-color-scheme: light) {
             :root {
@@ -44,6 +50,10 @@
                 --shadow-soft: rgba(60, 50, 30, 0.06);
                 --zebra: rgba(35, 33, 29, 0.022);
                 --hover: rgba(138, 75, 0, 0.07);
+                --tok-str: #3d6b26;
+                --tok-var: #0e615d;
+                --tok-kw: #7a3a8c;
+                --tok-num: #7a4406;
             }
         }
 
@@ -294,6 +304,33 @@
             font-size: 0.88rem;
             white-space: pre;
         }
+        /* 高亮 token。服务端分词产出（见 utils/syntax.rs），页面里没有 JS。
+           配色只分 5 组语义：提示符/选项最醒目（琥珀）、命令用正文色加粗、
+           字符串绿、变量青、关键字紫，注释与操作符压到次级灰。 */
+        .tok-prompt,
+        .tok-opt {
+            color: var(--accent);
+        }
+        .tok-cmd {
+            color: var(--fg);
+            font-weight: 600;
+        }
+        .tok-str {
+            color: var(--tok-str);
+        }
+        .tok-var {
+            color: var(--tok-var);
+        }
+        .tok-kw {
+            color: var(--tok-kw);
+        }
+        .tok-num {
+            color: var(--tok-num);
+        }
+        .tok-comment,
+        .tok-op {
+            color: var(--fg-muted);
+        }
 
         /* ---------- 行内代码 = 参数芯片 ---------- */
         :not(pre) > code {
@@ -477,6 +514,10 @@
                 --shadow-soft: transparent;
                 --zebra: #f7f6f2;
                 --hover: transparent;
+                --tok-str: #2f5220;
+                --tok-var: #0b4a47;
+                --tok-kw: #6a2f7a;
+                --tok-num: #7a4406;
             }
             body {
                 display: block;

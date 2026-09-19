@@ -4,8 +4,9 @@ use crate::i18n::Language;
 use crate::utils::debug_log;
 use crate::utils::platform::{self, OpenTarget};
 use crate::utils::process::resolve_program;
+use crate::utils::syntax;
 use anyhow::{Context, Result, bail};
-use pulldown_cmark::{Options, Parser, html};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, html};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -228,20 +229,7 @@ fn convert_md_to_html(markdown: &str, lang: Language, command: &str) -> String {
 
 /// 命令名会进 `<title>` 与 HTML 文本，需要转义，否则 `gg '<x>'` 之类
 /// 的命令名会破坏文档结构。
-fn html_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
+use crate::utils::syntax::escape_html as html_escape;
 
 fn markdown_to_html_body(markdown: &str) -> String {
     let mut options = Options::empty();
@@ -252,10 +240,73 @@ fn markdown_to_html_body(markdown: &str) -> String {
     options.insert(Options::ENABLE_HEADING_ATTRIBUTES);
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
 
-    let parser = Parser::new_ext(markdown, options);
+    let events: Vec<Event> = Parser::new_ext(markdown, options).collect();
     let mut html_output = String::new();
-    html::push_html(&mut html_output, parser);
+    html::push_html(&mut html_output, highlight_code_blocks(events).into_iter());
     html_output
+}
+
+/// 把代码块事件替换成带高亮 span 的 HTML。
+///
+/// pulldown-cmark 只产出纯文本的 `<pre><code>`，不做着色。这里在**事件流**
+/// 上把整个代码块收拢成一个 `Event::Html`（内容由我们自己转义），而不是
+/// 先生成 HTML 再回头解析改写 —— 后者要处理二次转义，容易出漏洞。
+fn highlight_code_blocks(events: Vec<Event<'_>>) -> Vec<Event<'_>> {
+    let mut out: Vec<Event> = Vec::with_capacity(events.len());
+    let mut index = 0usize;
+
+    while index < events.len() {
+        let Event::Start(Tag::CodeBlock(kind)) = &events[index] else {
+            out.push(events[index].clone());
+            index += 1;
+            continue;
+        };
+
+        let lang = match kind {
+            CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_string(),
+            CodeBlockKind::Indented => String::new(),
+        };
+
+        let mut code = String::new();
+        let mut cursor = index + 1;
+        while let Some(Event::Text(text)) = events.get(cursor) {
+            code.push_str(text);
+            cursor += 1;
+        }
+
+        // 事件流符合预期才改写，否则原样透传，避免把内容弄丢
+        if !matches!(events.get(cursor), Some(Event::End(TagEnd::CodeBlock))) {
+            out.extend(events[index..cursor].iter().cloned());
+            index = cursor;
+            continue;
+        }
+
+        let code = code.strip_suffix('\n').unwrap_or(&code);
+        out.push(Event::Html(render_code_block(code, &lang).into()));
+        index = cursor + 1;
+    }
+
+    out
+}
+
+fn render_code_block(code: &str, lang: &str) -> String {
+    // 语言标签会进 class 属性，只保留安全字符
+    let class: String = lang
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '+'))
+        .take(24)
+        .collect();
+
+    let class_attr = if class.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"language-{class}\"")
+    };
+
+    format!(
+        "<pre><code{class_attr}>{}</code></pre>\n",
+        syntax::highlight(code, lang)
+    )
 }
 
 fn print_raw(markdown: &str) {
@@ -412,7 +463,10 @@ mod tests {
 1. 有序项\n\
 \n\
 ```bash\n\
-grep -rn x .\n\
+# 递归搜索并显示行号\n\
+$ grep -rn \"TODO\" ./src\n\
+$ for f in *.md; do echo \"$f\"; done\n\
+$ test -f /tmp/x && echo $HOME || exit 1\n\
 ```\n\
 \n\
 | 参数 | 说明 |\n\
@@ -426,6 +480,21 @@ grep -rn x .\n\
 脚注[^1]\n\
 \n\
 [^1]: 脚注内容\n";
+
+    /// 去掉 CSS 注释 —— 注释里出现的 `.rs`、`#abc` 不该被当成选择器或颜色。
+    fn strip_css_comments(css: &str) -> String {
+        let mut out = String::with_capacity(css.len());
+        let mut rest = css;
+        while let Some(start) = rest.find("/*") {
+            out.push_str(&rest[..start]);
+            match rest[start + 2..].find("*/") {
+                Some(end) => rest = &rest[start + 2 + end + 2..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
 
     fn template_css() -> &'static str {
         TEMPLATE
@@ -500,7 +569,7 @@ grep -rn x .\n\
     fn every_css_class_selector_matches_the_rendered_markup() {
         let html = render_html_for_test(SAMPLE);
         let emitted = emitted_classes(&html);
-        let dead: Vec<String> = css_classes(template_css())
+        let dead: Vec<String> = css_classes(&strip_css_comments(template_css()))
             .into_iter()
             .filter(|name| !emitted.contains(name))
             .collect();
@@ -513,7 +582,7 @@ grep -rn x .\n\
 
     #[test]
     fn colors_are_defined_only_in_theme_blocks() {
-        let content = strip_root_blocks(template_css());
+        let content = strip_root_blocks(&strip_css_comments(template_css()));
         let chars: Vec<char> = content.chars().collect();
 
         let mut offenders: Vec<String> = Vec::new();
@@ -680,6 +749,14 @@ grep -rn x .\n\
             ("表格悬停行", "--fg", "--hover", 4.5),
             ("引用旁注", "--fg-muted", "--surface", 4.5),
             ("装饰标记", "--accent-dim", "--bg", 3.0),
+            // 代码高亮各 token（底色都是代码块的 --surface）
+            ("高亮·提示符/选项", "--accent", "--surface", 4.5),
+            ("高亮·命令", "--fg", "--surface", 4.5),
+            ("高亮·字符串", "--tok-str", "--surface", 4.5),
+            ("高亮·变量", "--tok-var", "--surface", 4.5),
+            ("高亮·关键字", "--tok-kw", "--surface", 4.5),
+            ("高亮·数字", "--tok-num", "--surface", 4.5),
+            ("高亮·注释/操作符", "--fg-muted", "--surface", 4.5),
         ];
 
         for (mode, vars) in [("深色（默认）", &dark), ("浅色", &light_vars)] {
