@@ -109,6 +109,7 @@ ai_timeout_seconds = 180  # AI 最长等待秒数，0 表示不限制
 | 变量 | 说明 |
 |---|---|
 | `GG_NOTES_DIR` | 笔记目录 |
+| `GG_CONFIG_DIR` | 配置根目录（显式覆盖平台默认位置，便于可移植部署） |
 | `GG_GLOW_BIN` | `glow` 路径，支持带参数：`"glow -s dark -w 80"` |
 | `GG_AI_BIN` | 替换 AI 可执行文件（保留预设参数）；旧名 `GG_CLAUDE_BIN` 仍兼容 |
 | `GG_EDITOR` / `VISUAL` / `EDITOR` | 编辑器，优先级依次降低 |
