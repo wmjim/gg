@@ -186,11 +186,14 @@
             margin: 1em auto;
             border-radius: 4px;
         }
-        .task-list-item {
+        /* pulldown-cmark 不给任务列表项加类名，选择器只能按实际产出
+           （li 内直接包着 checkbox）来写；不支持 :has() 的浏览器会整条
+           规则失效，退化为项目符号 + 复选框，不会更劣。 */
+        li:has(input[type="checkbox"]) {
             list-style: none;
             margin-left: -1.3em;
         }
-        .task-list-item input {
+        li:has(input[type="checkbox"]) input {
             margin-right: 0.6em;
         }
         .command {

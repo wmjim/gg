@@ -335,6 +335,35 @@ mod tests {
         assert!(html.contains("<table>"), "表格失效:\n{html}");
     }
 
+    /// 任务列表样式必须与实际产出对齐。
+    ///
+    /// 模板里曾按 `.task-list-item` 写样式，但 pulldown-cmark 从不输出该类名
+    /// （0.11 与 0.13 的源码均无），那段 CSS 一直是死代码，浏览器里会同时
+    /// 出现项目符号与复选框。这个用例把「选择器 ↔ 实际 HTML」的关系钉住，
+    /// 以后换版本若产出结构变了会直接失败提醒。
+    #[test]
+    fn task_list_css_matches_the_markup_we_emit() {
+        let html = render_html_for_test("- [ ] 待办\n");
+
+        assert!(
+            html.contains("<li><input") && html.contains(r#"type="checkbox""#),
+            "任务列表的产出结构变了，需同步核对模板里的选择器:\n{html}"
+        );
+        assert!(
+            !html.contains("task-list-item"),
+            "渲染器已开始输出类名，可以改回按类名选了:\n{html}"
+        );
+
+        assert!(
+            !TEMPLATE.contains("task-list-item"),
+            "模板不应再引用永远不会出现的类名"
+        );
+        assert!(
+            TEMPLATE.contains(r#"li:has(input[type="checkbox"])"#),
+            "模板缺少与实际产出对齐的任务列表选择器"
+        );
+    }
+
     #[test]
     fn stale_render_files_are_pruned_but_other_files_are_kept() {
         let dir = tempfile::tempdir().expect("tempdir");
