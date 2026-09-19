@@ -11,7 +11,7 @@
 ## 功能
 
 - 查询：`gg <cmd>`
-- 列表：`gg list`
+- 列表：`gg list`（终端下按宽度多列显示）
 - 搜索：`gg search <keyword>`（默认按文件名）
 - 全文搜索：`gg search -c <keyword>`（按笔记正文，grep 风格输出）
 - 路径优先级：`--notes-dir` > `GG_NOTES_DIR` > 系统配置目录下 `gg/notes`
@@ -115,6 +115,21 @@ $ gg search -c 递归
 grep:12: 递归搜索目录下所有文件
 grep:13: 递归时要小心软链接
 ```
+
+### 列表的列布局
+
+`gg list` / `gg search` 在 **stdout 是终端**时按终端宽度排成多列，行为对齐 `ls`：
+列内纵向填充、列间对齐、无行尾空格。管道或重定向时仍为每行一条，
+保证 `gg list | grep x` 这类脚本不受影响。
+
+```text
+$ gg list
+alias  clear    echo    grep          jobs    more    ripgrep  tee      xargs
+apt    command  export  head          kill    mv      rm       timeout  zip
+aur    cp       fd      helix         less    nohup   sed      tmux     zoxide
+```
+
+列宽取环境变量 `COLUMNS`，未设置时按 80 列。
 
 ## 退出码
 
@@ -234,6 +249,21 @@ gg --set-editor vim
 gg --set-editor "code -w"
 ```
 
+## 跳过交互确认
+
+`-y/--yes` 对所有询问自动回答「是」，相当于在**本次运行内**授权非交互生成
+与落盘，无需改配置：
+
+```bash
+gg -y foo          # 未命中时直接调用 claude 并按 auto_save_ai 落盘
+```
+
+它的边界：
+
+- 只替代询问，**不会**绕过「claude 是否可用」的判断
+- 未启用询问（`ask_before_save = false`）时，不会把 `auto_save_ai = false` 变成保存
+- 会直接产生费用与磁盘写入，在脚本里使用前请确认清楚
+
 ## 设置默认语言
 
 `--lang` 可设置显示语言（zh/en）并保存到配置：
@@ -249,7 +279,8 @@ gg --lang en
 ## 排查问题
 
 设置 `GG_DEBUG=1` 可输出带时间戳与调用点上下文的调试日志，
-用于定位「候选程序一个都没成功」这类多级回退问题：
+用于定位「候选程序一个都没成功」这类多级回退问题，
+以及查看具体是哪个笔记条目被跳过、原因是什么：
 
 ```bash
 GG_DEBUG=1 gg --browser ls
@@ -258,7 +289,23 @@ GG_DEBUG=1 gg --browser ls
 ```text
 [DEBUG] 2026-09-19T04:34:09Z platform::open_native: `gnome-open` 不在 PATH 中, 跳过
 [DEBUG] 2026-09-19T04:34:09Z platform::open_native: 已通过 `xdg-open` 打开 /tmp/gg/gg-render-xxx.html (target="浏览器")
+[DEBUG] 2026-09-19T08:56:26Z app::warn_skipped: 跳过 ~/.config/gg/notes/xx.md —— file name is not valid UTF-8
 ```
+
+## 单个条目损坏时的行为
+
+扫描笔记目录时，单个条目的权限问题、扫描期间被删除、文件名非 UTF-8、
+笔记内容读不出来，都**不会**让整个 `gg list` / `gg search` 失败：
+
+```text
+$ gg list
+有 1 个条目无法读取，已跳过（用 GG_DEBUG=1 查看详情）。
+alias
+apt
+...
+```
+
+告警走 stderr，直接接到脚本里不会污染 stdout。
 
 ## 项目结构
 
@@ -270,14 +317,16 @@ src/
   app.rs            应用编排层 / QueryService（依赖注入）
   config.rs         配置模型、路径解析（强类型枚举）
   i18n.rs           中英文案唯一来源
-  notes.rs          笔记仓储层（读写、列举、模糊建议）
+  notes.rs          笔记仓储层（扫描、读写、正文搜索、模糊建议）
   render.rs         Markdown 渲染（终端 glow / 浏览器）
   editor.rs         编辑器启动与回退链
   ai.rs             Claude 笔记生成
   prompt.rs         交互提示端口
   utils/
-    process.rs      可执行命令字符串解析
+    process.rs      可执行命令字符串解析与带超时的子进程等待
     platform.rs     跨平台「打开路径」（含 WSL 互操作）
+    layout.rs       终端多列布局（对齐 ls 的列内纵向填充）
+    output.rs       stdout 写入，吸收 EPIPE
   assets/
     note_template.html   浏览器渲染模板
 tests/
