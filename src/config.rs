@@ -536,6 +536,26 @@ language = "zh"
         assert!(path.is_file());
     }
 
+    /// 配置文件是 0600。
+    ///
+    /// 这条与笔记共享同一策略（`gg` 创建的文件一律属主可读写），因此两边各钉一次：
+    /// 以后若有人把某一侧放宽，会立刻在测试里暴露。
+    #[cfg(unix)]
+    #[test]
+    fn saved_config_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+
+        AppConfig::default()
+            .save_to(&path, Language::Zh)
+            .expect("保存成功");
+
+        let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "配置文件应为 0600，实际 {mode:o}");
+    }
+
     /// 写入失败必须报错，且不得在目标位置留下半成品。
     #[test]
     fn failed_save_reports_an_error_and_writes_nothing() {

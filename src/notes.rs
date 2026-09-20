@@ -154,10 +154,15 @@ pub fn ensure_note_file(notes_dir: &Path, command: &str, lang: Language) -> Resu
         .create_new(true)
         .open(&path)
     {
-        Ok(_) => Ok(EnsuredNote {
-            path,
-            created: true,
-        }),
+        Ok(file) => {
+            // 先关句柄再改权限，避免 Windows 上因占用而失败。
+            drop(file);
+            set_private_permissions(&path).with_context(|| lang.note_create_failed(&target))?;
+            Ok(EnsuredNote {
+                path,
+                created: true,
+            })
+        }
         // 已存在：可能是笔记，也可能是同名目录（或悬空符号链接）。
         // 只有真实文件才交回给调用方打开 —— 把目录交给编辑器是另一类错误。
         Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
@@ -172,6 +177,26 @@ pub fn ensure_note_file(notes_dir: &Path, command: &str, lang: Language) -> Resu
         }
         Err(err) => Err(err).with_context(|| lang.note_create_failed(&target)),
     }
+}
+
+/// 把 `gg` 新建的文件收敛到 0600（属主可读写）。
+///
+/// 这是 `gg` 自己创建的文件（配置文件与笔记）共同遵守的策略：笔记是个人内容，
+/// 默认不需要对其他用户可读。写入路径的 0600 来自 `utils::atomic`（`tempfile`
+/// 以 0600 创建临时文件），这里创建的是空文件，所以要显式设一次。
+///
+/// 用户自己用编辑器新建的笔记不在此列 —— 那是编辑器按自己的 umask 建的。
+#[cfg(unix)]
+fn set_private_permissions(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+/// 非 Unix 平台没有 POSIX 权限位（Windows 的只读标志是另一种语义），空操作。
+#[cfg(not(unix))]
+fn set_private_permissions(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// 删除笔记文件。返回 `false` 表示该命令本来就没有笔记。
@@ -482,6 +507,32 @@ mod tests {
             note_file_names(temp.path()),
             vec!["ls.md"],
             "不得留下临时文件"
+        );
+    }
+
+    /// 取文件权限位（仅 Unix）。
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::metadata(path).expect("stat").permissions().mode() & 0o777
+    }
+
+    /// `gg` 创建的笔记一律 0600，与配置文件同一策略：笔记是个人内容，默认
+    /// 不需要对其他用户可读。两条写入路径（新建空文件、原子写）都要跟上。
+    #[cfg(unix)]
+    #[test]
+    fn gg_created_notes_are_private() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        let empty = ensure_note_file(temp.path(), "ls", Language::Zh).expect("新建空笔记");
+        assert_eq!(mode_of(&empty.path), 0o600, "新建的空笔记应为 0600");
+
+        let written = write_note(temp.path(), "grep", "# grep\n", Language::Zh).expect("写笔记");
+        assert_eq!(
+            mode_of(&written),
+            0o600,
+            "原子写产出的笔记同样是 0600（临时文件由 tempfile 以 0600 创建）"
         );
     }
 
