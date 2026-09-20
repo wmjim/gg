@@ -531,6 +531,59 @@ fn failing_editor_is_reported_instead_of_silently_falling_back() {
         .stderr(predicate::str::contains("退出码"));
 }
 
+/// 非交互终端下 `gg -e` 不得启动终端编辑器。
+///
+/// 没有终端时 nvim/vim 不是报错，而是**一直阻塞在读输入上** —— 本项目的集成
+/// 测试因此必须始终指定假编辑器，否则 CI 会挂死。
+///
+/// 这里用一个「被启动就在文件里留下痕迹」的假 `nvim` 直接断言**它没被启动**，
+/// 而不是去等它阻塞。PATH 里只放这个假 bin 目录：于是「系统默认程序」那条路
+/// 也必然失败，报错与退出码都是确定的，也不会在开发者桌面上弹出编辑器。
+#[cfg(target_os = "linux")]
+#[test]
+fn edit_does_not_launch_a_terminal_editor_without_a_terminal() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let bin_dir = temp.path().join("bin");
+    let launched = temp.path().join("nvim-was-launched");
+    write_fake_tool(
+        &bin_dir,
+        "nvim",
+        &format!("#!/bin/sh\necho launched >> {}\n", launched.display()),
+        "@echo off\r\necho launched >> launched.txt\r\n",
+    );
+
+    let mut cmd = command_for(&temp);
+    cmd.env("PATH", &bin_dir);
+    // 万一将来护栏被改坏，也让测试失败而不是把 CI 挂死。
+    cmd.timeout(std::time::Duration::from_secs(15));
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "--edit",
+        "ls",
+    ]);
+
+    // `output()` 给子进程接的是管道、不是 TTY，因此 `is_terminal()` 为假 ——
+    // 结果与测试是怎么跑起来的（终端里还是 CI 里）无关。
+    let output = cmd.output().expect("运行 gg");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "应当以运行时错误退出；退出码为 None 说明 gg 被超时杀掉了，即它真的挂住了"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("非交互终端"),
+        "报错要说明真正的原因，否则会误导用户去「安装 nvim」（而它已经装了）: {stderr}"
+    );
+    assert!(!launched.exists(), "非交互终端下仍然把终端编辑器启动起来了");
+}
+
 /// `--yes` 应能在非交互场景授权生成，且不用改配置。
 #[test]
 fn yes_flag_authorizes_non_interactive_generation() {

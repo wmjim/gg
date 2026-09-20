@@ -256,6 +256,10 @@ impl Language {
             zh: "未找到可用的编辑器。请设置 GG_EDITOR/EDITOR/VISUAL，或安装 nvim/vim/helix/nano。",
             en: "No usable editor found. Set GG_EDITOR/EDITOR/VISUAL or install nvim/vim/helix/nano.",
         },
+        terminal_editor_needs_terminal() => {
+            zh: "非交互终端：不会自动启动终端编辑器（nvim/vim 这类需要终端）。请在交互终端中执行，或用 `--set-editor` 指定无需终端的编辑器",
+            en: "Non-interactive terminal: not starting a terminal editor (nvim/vim need a TTY). Run in an interactive terminal, or set an editor that does not need one with `--set-editor`",
+        },
 
         // ---------- 错误 ----------
         //

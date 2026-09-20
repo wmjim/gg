@@ -149,9 +149,23 @@ fn env_editor_spec() -> Option<String> {
 fn open_with_system_default(path: &Path, lang: Language) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        // `Command` 只在这个平台分支里用到，导入放在分支内：
+        // `Command` / `IsTerminal` 只在这个平台分支里用到，导入放在分支内：
         // 放在文件顶部会在别的平台上被判为未使用的导入。
+        use std::io::IsTerminal;
         use std::process::Command;
+
+        // 终端编辑器必须有真正的终端。没有终端时它们不是报错，而是**一直阻塞在
+        // 读输入上** —— 本项目的集成测试因此必须始终指定假编辑器，否则 CI 会挂死。
+        // 所以只在 stdin 是终端时才尝试它们，其余情况把真正的原因写进报错：若沿用
+        // 「未找到可用的编辑器」那条文案，会误导用户去「安装 nvim」，而它已经装了。
+        //
+        // 只拦「自动挑选的终端编辑器」，不动用户显式指定的编辑器
+        // （config / GG_EDITOR / VISUAL / EDITOR）—— `code -w` 这类本来就
+        // 不需要终端，由上面的分支直接启动。
+        if !std::io::stdin().is_terminal() {
+            return platform::open_path(path, OpenTarget::Editor, lang)
+                .map_err(|err| err.context(lang.terminal_editor_needs_terminal()));
+        }
 
         // 终端编辑器优先，避免在 WSL / 无桌面环境下误开 GUI 程序。
         for editor in ["nvim", "vim", "vi", "hx", "helix", "nano"] {
