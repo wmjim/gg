@@ -195,12 +195,21 @@ fn glow_bin() -> String {
         .unwrap_or_else(|| "glow".to_string())
 }
 
-/// 浏览器渲染产物集中目录；不再把临时文件散落在系统临时目录根部。
+/// 浏览器渲染产物集中目录。
+///
+/// 优先放平台缓存目录（Linux `~/.cache/gg`、macOS `~/Library/Caches/gg`、
+/// Windows `%LOCALAPPDATA%\gg`）：共享的 `/tmp` 在多用户机器上会暴露产物
+/// 文件名，也可能被他人抢先建目录。拿不到缓存目录时退回系统临时目录。
 fn browser_cache_dir(lang: Language) -> Result<PathBuf> {
-    let dir = std::env::temp_dir().join("gg");
+    let dir = render_cache_root(dirs::cache_dir(), std::env::temp_dir());
     fs::create_dir_all(&dir)
         .with_context(|| lang.temp_dir_create_failed(&dir.display().to_string()))?;
     Ok(dir)
+}
+
+/// 选出渲染产物目录。参数化是为了脱离进程环境测试。
+fn render_cache_root(cache_dir: Option<PathBuf>, temp_dir: PathBuf) -> PathBuf {
+    cache_dir.unwrap_or(temp_dir).join("gg")
 }
 
 /// 浏览器是异步读取文件的，渲染结束后不能立即删除，只能事后回收。
@@ -863,6 +872,20 @@ $ test -f /tmp/x && echo $HOME || exit 1\n\
 
         assert!(!html.contains("<b>&"), "命令名未转义: {html}");
         assert!(html.contains("&lt;b&gt;&amp;&quot;&#39;"), "转义结果不对");
+    }
+
+    #[test]
+    fn render_artifacts_prefer_the_platform_cache_dir() {
+        // 平台中立：路径来自 tempdir，不写死 `/cache` 这类 POSIX 字面量。
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cache = temp.path().join("cache");
+        let tmp = temp.path().join("tmp");
+
+        assert_eq!(
+            render_cache_root(Some(cache.clone()), tmp.clone()),
+            cache.join("gg")
+        );
+        assert_eq!(render_cache_root(None, tmp.clone()), tmp.join("gg"));
     }
 
     #[test]
