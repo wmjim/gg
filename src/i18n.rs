@@ -405,6 +405,14 @@ impl Language {
             zh: "搜索关键词不能为空（例如 `gg search grep`）",
             en: "Search keyword cannot be empty (e.g. `gg search grep`)",
         },
+        search_no_match_name(keyword: &str) => {
+            zh: "没有名称匹配 `{keyword}` 的笔记（可加 `-c` 搜索正文）",
+            en: "No note name matches `{keyword}` (add `-c` to search note bodies)",
+        },
+        search_no_match_content(keyword: &str) => {
+            zh: "笔记正文中没有匹配 `{keyword}` 的内容",
+            en: "No note body matches `{keyword}`",
+        },
         help_print_failed() => {
             zh: "无法输出帮助信息",
             en: "Failed to print help",

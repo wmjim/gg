@@ -136,9 +136,19 @@ pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
             // 与 `grep` 一致：搜索是一次带条件的查询，无命中即「没有产生任何
             // 结果」，返回 3，便于 `gg search foo || echo 没找到`。`list` 是
             // 枚举而非查询，空目录仍按成功处理。
+            //
+            // 原因写 stderr：stdout 必须保持干净，否则 `gg search x > out.txt`
+            // 会把提示写进文件。两种模式的建议不同——只有名称搜索才该提示
+            // 「加 `-c` 搜正文」，在正文模式下再提一次就是错误建议。
             Ok(if matched {
                 ExitCode::SUCCESS
             } else {
+                let message = if content {
+                    lang.search_no_match_content(&keyword)
+                } else {
+                    lang.search_no_match_name(&keyword)
+                };
+                eprintln!("{message}");
                 ExitCode::from(EXIT_NOTE_NOT_FOUND)
             })
         }

@@ -202,8 +202,14 @@ fn search_ignores_note_bodies_by_default() {
         "关键字",
     ]);
 
-    // 未命中即「没有产生任何结果」：退出码 3，stdout 保持为空。
-    cmd.assert().failure().code(3).stdout("");
+    // 未命中即「没有产生任何结果」：退出码 3，stdout 保持为空（管道/重定向
+    // 不应被提示污染），原因写在 stderr，并提示还有正文搜索可试。
+    cmd.assert()
+        .failure()
+        .code(3)
+        .stdout("")
+        .stderr(predicate::str::contains("没有名称匹配 `关键字` 的笔记"))
+        .stderr(predicate::str::contains("-c"));
 }
 
 #[test]
@@ -249,22 +255,65 @@ fn search_content_flag_accepts_long_form() {
 
 /// `search` 是带条件的查询：无命中即「没有产生任何结果」，必须像 `grep` 一样
 /// 返回退出码 3，便于 `gg search foo || echo 没找到`。
+///
+/// 两种模式的提示不同：只有名称搜索该建议加 `-c` 去搜正文。
 #[test]
 fn search_without_matches_exits_3() {
-    for extra in [Vec::new(), vec!["-c"]] {
+    let cases: &[(&[&str], &str)] = &[
+        (&[], "没有名称匹配 `zzzz` 的笔记"),
+        (&["-c"], "笔记正文中没有匹配 `zzzz` 的内容"),
+    ];
+
+    for (extra, expected) in cases {
         let temp = TempDir::new().expect("tempdir");
         let notes_dir = temp.path().join("notes");
         write_note(&notes_dir, "ls", "# ls\n列出目录\n");
 
         let mut cmd = command_for(&temp);
         cmd.arg("--notes-dir").arg(&notes_dir);
-        cmd.arg("search").args(&extra).arg("zzzz");
+        cmd.arg("search").args(*extra).arg("zzzz");
 
         cmd.assert()
             .failure()
             .code(3)
-            .stdout(predicate::str::is_empty());
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(*expected));
     }
+}
+
+/// 正文模式下不该再建议加 `-c` —— 那已经是本次用过的模式。
+#[test]
+fn content_search_no_match_does_not_suggest_content_flag() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.arg("--notes-dir").arg(&notes_dir);
+    cmd.arg("search").arg("-c").arg("zzzz");
+
+    cmd.assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("-c").not());
+}
+
+#[test]
+fn search_no_match_reason_is_localized() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.arg("--lang").arg("en");
+    cmd.arg("--notes-dir").arg(&notes_dir);
+    cmd.arg("search").arg("zzzz");
+
+    cmd.assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("No note name matches `zzzz`"))
+        .stderr(predicate::str::contains("没有").not());
 }
 
 /// 空关键词是用法错误：`gg search $var` 而变量为空时最常见。
