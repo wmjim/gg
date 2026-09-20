@@ -262,8 +262,12 @@ impl Language {
             en: "Command names cannot contain spaces; name multi-word notes with hyphens, e.g. `git-log.md` for `gg git-log`",
         },
         note_command_has_path_chars() => {
-            zh: "命令名不能包含 `/`、`\\`、`:` 这些路径字符",
-            en: "Command name contains unsupported path characters",
+            zh: "命令名不能包含 `/`、`\\`、`:` 等路径字符，也不能包含 `*`、`?`、`<`、`>`、`|`、双引号（Windows 文件名非法字符）",
+            en: "Command name contains unsupported path characters, or characters Windows forbids in file names",
+        },
+        note_command_is_reserved(name: &str) => {
+            zh: "`{name}` 是系统保留设备名（如 CON、NUL、COM1），不能作为笔记名",
+            en: "`{name}` is a reserved device name (e.g. CON, NUL, COM1) and cannot be used as a note name",
         },
         note_read_failed(path: &str) => {
             zh: "无法读取笔记文件: {path}",

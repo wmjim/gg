@@ -7,6 +7,16 @@ pub fn note_path(notes_dir: &Path, command: &str) -> PathBuf {
     notes_dir.join(format!("{command}.md"))
 }
 
+/// Windows 文件名非法字符。`/` 与 `\` 同时也是路径分隔符；这里在所有平台
+/// 一律拒绝 —— 真实命令名几乎不会包含它们，而笔记目录可能被同步到 Windows。
+const INVALID_NAME_CHARS: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+
+/// Windows 保留设备名（大小写不敏感，带扩展名同样保留）。
+const RESERVED_DEVICE_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
 pub fn validate_command_name(command: &str, lang: Language) -> Result<()> {
     anyhow::ensure!(!command.is_empty(), "{}", lang.note_command_empty());
     anyhow::ensure!(
@@ -15,11 +25,25 @@ pub fn validate_command_name(command: &str, lang: Language) -> Result<()> {
         lang.note_command_has_whitespace()
     );
     anyhow::ensure!(
-        !command.chars().any(|c| c == '/' || c == '\\' || c == ':'),
+        !command.chars().any(|c| INVALID_NAME_CHARS.contains(&c)),
         "{}",
         lang.note_command_has_path_chars()
     );
+    anyhow::ensure!(
+        !is_reserved_device_name(command),
+        "{}",
+        lang.note_command_is_reserved(command)
+    );
     Ok(())
+}
+
+/// Windows 上 `CON`、`NUL`、`COM1` 这类设备名不能作为文档名，`CON.md` 也算。
+/// 命令名里已经排除了路径分隔符，这里只比较扩展名之前的部分。
+fn is_reserved_device_name(command: &str) -> bool {
+    let stem = command.split('.').next().unwrap_or(command);
+    RESERVED_DEVICE_NAMES
+        .iter()
+        .any(|name| stem.eq_ignore_ascii_case(name))
 }
 
 /// [`ensure_note_file`] 的结果。
@@ -334,6 +358,36 @@ mod tests {
             format!("{traversal:#}").contains("unsupported path characters"),
             "{traversal:#}"
         );
+
+        let reserved = validate_command_name("nul", Language::En).expect_err("保留设备名应被拒");
+        assert!(format!("{reserved:#}").contains("nul"), "{reserved:#}");
+    }
+
+    /// Windows 下这些字符与名字不能做文件名。跨平台一律拒绝，免得笔记目录
+    /// 同步到 Windows 之后才炸。
+    #[test]
+    fn windows_illegal_names_are_rejected_everywhere() {
+        for name in ["a?b", "a*b", "a\"b", "a<b", "a>b", "a|b"] {
+            assert!(
+                validate_command_name(name, Language::Zh).is_err(),
+                "`{name}` 含 Windows 非法字符，应被拒绝"
+            );
+        }
+
+        for name in ["con", "CON", "nul", "aux", "com1", "COM9", "lpt9", "con.md"] {
+            assert!(
+                validate_command_name(name, Language::Zh).is_err(),
+                "`{name}` 是保留设备名，应被拒绝"
+            );
+        }
+
+        // 近似名字不能误伤
+        for name in ["console", "com10", "nulify", "lpt", "ls"] {
+            assert!(
+                validate_command_name(name, Language::Zh).is_ok(),
+                "`{name}` 应当允许"
+            );
+        }
     }
 
     #[test]
