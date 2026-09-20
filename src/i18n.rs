@@ -258,8 +258,8 @@ impl Language {
             en: "Command name cannot be empty",
         },
         note_command_has_whitespace() => {
-            zh: "命令名必须是单个词，不能含空格",
-            en: "Command name must be a single token without spaces",
+            zh: "命令名不能含空格；多词命令请用连字符命名笔记，例如 `git-log.md` 对应 `gg git-log`",
+            en: "Command names cannot contain spaces; name multi-word notes with hyphens, e.g. `git-log.md` for `gg git-log`",
         },
         note_command_has_path_chars() => {
             zh: "命令名不能包含 `/`、`\\`、`:` 这些路径字符",

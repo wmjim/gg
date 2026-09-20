@@ -318,11 +318,15 @@ mod tests {
     fn command_name_errors_are_localized() {
         let zh = validate_command_name("docker run", Language::Zh).expect_err("含空格应被拒");
         assert!(format!("{zh:#}").contains("不能含空格"), "{zh:#}");
+        assert!(
+            format!("{zh:#}").contains("git-log.md"),
+            "多词查询应给出可操作的命名提示: {zh:#}"
+        );
 
         let en = validate_command_name("docker run", Language::En).expect_err("含空格应被拒");
-        assert_eq!(
-            format!("{en:#}"),
-            "Command name must be a single token without spaces"
+        assert!(
+            format!("{en:#}").contains("cannot contain spaces"),
+            "{en:#}"
         );
 
         let traversal = validate_command_name("../ls", Language::En).expect_err("路径穿越应被拒");
