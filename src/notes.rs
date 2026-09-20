@@ -125,8 +125,13 @@ pub fn write_note(
         .with_context(|| lang.notes_dir_create_failed(&notes_dir.display().to_string()))?;
 
     let path = note_path(notes_dir, command);
-    fs::write(&path, content)
-        .with_context(|| lang.note_write_failed(&path.display().to_string()))?;
+    let target = path.display().to_string();
+    // 原子写：AI 生成的内容可能很长，中途被杀不能留下半截笔记。
+    // 临时文件名带 `.tmp` 后缀（而非 `.md`），因此即使崩溃残留也不会被
+    // `scan_commands` 当成一条笔记。
+    crate::utils::atomic::replace_file(&path, content, ".gg-note-", &|| {
+        lang.note_write_failed(&target)
+    })?;
     Ok(path)
 }
 pub fn ensure_note_file(notes_dir: &Path, command: &str, lang: Language) -> Result<EnsuredNote> {
@@ -422,6 +427,71 @@ mod tests {
         assert!(!second.created, "已存在时不得报告创建");
         let content = fs::read_to_string(&second.path).expect("读取笔记");
         assert_eq!(content, "# ls\n", "已存在的笔记内容不得被清空");
+    }
+
+    /// `write_note` 负责按需建目录：AI 生成时笔记目录可能还不存在。
+    #[test]
+    fn write_note_creates_the_notes_directory_on_demand() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let nested = temp.path().join("a").join("b");
+
+        let path = write_note(&nested, "ls", "# ls\n", Language::Zh).expect("按需建目录并写入");
+
+        assert_eq!(path, nested.join("ls.md"));
+        assert_eq!(fs::read_to_string(&path).expect("读取"), "# ls\n");
+    }
+
+    /// 写入是「原子替换」：旧内容完整消失，且不留临时文件。
+    #[test]
+    fn write_note_replaces_content_without_leaving_temp_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_note(
+            temp.path(),
+            "ls",
+            "# 旧内容，比新内容长很多\n",
+            Language::Zh,
+        )
+        .expect("首次写入");
+        write_note(temp.path(), "ls", "# 新\n", Language::Zh).expect("覆盖写入");
+
+        assert_eq!(
+            fs::read_to_string(temp.path().join("ls.md")).expect("读取"),
+            "# 新\n"
+        );
+        assert_eq!(
+            note_file_names(temp.path()),
+            vec!["ls.md"],
+            "不得留下临时文件"
+        );
+    }
+
+    /// 崩溃残留的临时文件不能冒充笔记。
+    ///
+    /// 原子写用「同目录临时文件 + rename」，只在写与 rename 之间被杀时才留残留。
+    /// 残留之所以无害，靠的是它带 `.tmp` 而不是 `.md` 后缀 —— 这条不变量一旦
+    /// 破了，`gg list` 就会多出一条以随机名命名的“笔记”。
+    #[test]
+    fn scan_commands_ignores_leftover_write_temp_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_note(temp.path(), "ls", "# ls\n", Language::Zh).expect("写笔记");
+        fs::write(temp.path().join(".gg-note-AbC123.tmp"), "半截内容").expect("模拟崩溃残留");
+
+        let found = scan_commands(temp.path(), Language::Zh).expect("扫描不应整体失败");
+
+        assert_eq!(found.items, vec!["ls".to_string()], "残留文件不得冒充笔记");
+        assert!(found.skipped.is_empty(), "残留文件不是错误，不该上报");
+    }
+
+    /// 目录下所有条目的文件名（排序），用于断言「没留下垃圾」。
+    #[cfg(test)]
+    fn note_file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("读目录")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]

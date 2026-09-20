@@ -1,3 +1,4 @@
+pub mod atomic;
 pub mod layout;
 pub mod output;
 pub mod platform;
