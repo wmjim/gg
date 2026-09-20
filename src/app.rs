@@ -4,7 +4,7 @@
 //! AI 生成器与编辑器，使「非交互场景不得触发 AI / 落盘」这类规则可被单测覆盖。
 
 use crate::ai::{AiNoteGenerator, NoteGenerator};
-use crate::cli::{Action, Cli};
+use crate::cli::{Action, Cli, CliParts};
 use crate::config::{self, AiInvocation, AppConfig};
 use crate::editor::{self, EditorLauncher, SystemEditor};
 use crate::error;
@@ -48,6 +48,9 @@ pub const EXIT_NOTE_NOT_FOUND: u8 = 3;
 
 pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
     let parts = cli.into_parts();
+    // 先校验选项与动作是否搭配，再产生任何副作用（写配置、新建或删除笔记）。
+    validate_output_flags(&parts, lang)?;
+
     let notes_dir = config::resolve_notes_dir(parts.notes_dir, lang)?;
     let mut config = AppConfig::load(lang)?;
 
@@ -198,6 +201,41 @@ pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
             print_help(lang)?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// 校验只对查询有意义的输出选项。
+///
+/// `--browser` / `--edit` 修饰的是「把某条笔记渲染出来 / 打开它」这个动作。用在
+/// `list` / `search` / `rm` 上时它们什么也不影响，静默忽略会让用户以为自己设对了
+/// 参数；两者同时给出时更是只有一个会生效。两种情形都按用法错误拒绝（退出码 2）。
+///
+/// 无动作（`gg` / `gg -b`）不在此列：那会打印帮助，用户已经拿到有用的信息，
+/// 没必要再报错。
+fn validate_output_flags(parts: &CliParts, lang: Language) -> Result<()> {
+    if parts.browser && parts.edit {
+        return Err(error::usage(lang.browser_and_edit_conflict()));
+    }
+
+    // 选项名与子命令名是字面量 token，不随界面语言变化。
+    let flag = if parts.edit {
+        "--edit"
+    } else if parts.browser {
+        "--browser"
+    } else {
+        return Ok(());
+    };
+
+    let command = match &parts.action {
+        Action::List => Some("list"),
+        Action::Search { .. } => Some("search"),
+        Action::Remove(_) => Some("rm"),
+        Action::Query(_) | Action::None => None,
+    };
+
+    match command {
+        Some(command) => Err(error::usage(lang.output_flag_needs_query(flag, command))),
+        None => Ok(()),
     }
 }
 

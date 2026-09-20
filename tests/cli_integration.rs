@@ -1222,6 +1222,82 @@ fn invalid_command_line_arguments_exit_with_2() {
     }
 }
 
+/// `--browser` / `--edit` 只修饰查询。用在 `list` / `search` / `rm` 上时必须报错，
+/// 而不是静默忽略：用户会以为自己设对了参数，实际上什么都没发生。
+#[test]
+fn output_flags_are_rejected_for_non_query_actions() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["--browser", "list"], "`--browser` 只对查询有效"),
+        (&["-b", "search", "x"], "`--browser` 只对查询有效"),
+        (&["--browser", "rm", "ls"], "`--browser` 只对查询有效"),
+        (&["--edit", "list"], "`--edit` 只对查询有效"),
+        (&["-e", "search", "x"], "`--edit` 只对查询有效"),
+        (&["--edit", "rm", "ls"], "`--edit` 只对查询有效"),
+    ];
+
+    for (args, expected) in cases {
+        let temp = TempDir::new().expect("tempdir");
+        let notes_dir = temp.path().join("notes");
+        write_note(&notes_dir, "ls", "# ls\n");
+
+        let mut cmd = command_for(&temp);
+        cmd.arg("--notes-dir").arg(&notes_dir).args(*args);
+
+        cmd.assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains(*expected))
+            // 报错还要告诉用户正确的写法。
+            .stderr(predicate::str::contains("`gg --"));
+    }
+}
+
+/// 校验必须发生在动作之前：`--browser rm` 既然报了用法错误，就绝不能已经把笔记删了。
+#[test]
+fn output_flag_validation_happens_before_the_action() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.arg("--notes-dir").arg(&notes_dir);
+    cmd.args(["--browser", "--yes", "rm", "ls"]);
+
+    cmd.assert().failure().code(2);
+    assert!(notes_dir.join("ls.md").exists(), "用法错误时不得删除笔记");
+}
+
+/// 两者同时给出时，此前 `--edit` 会静默胜出，`--browser` 被无声丢弃。
+#[test]
+fn browser_and_edit_together_are_rejected() {
+    for args in [vec!["-b", "-e", "ls"], vec!["-e", "-b", "ls"]] {
+        let temp = TempDir::new().expect("tempdir");
+        let notes_dir = temp.path().join("notes");
+        write_note(&notes_dir, "ls", "# ls\n");
+
+        let mut cmd = command_for(&temp);
+        cmd.arg("--notes-dir").arg(&notes_dir).args(&args);
+
+        cmd.assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains("不能同时使用"));
+    }
+}
+
+/// 无动作时不算错误：`gg -b` 跟裸 `gg` 一样打印帮助，用户已经拿到有用信息。
+#[test]
+fn output_flag_without_an_action_still_prints_help() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut cmd = command_for(&temp);
+    cmd.arg("--browser");
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("用法:"));
+}
+
 #[test]
 fn set_editor_persists_to_config() {
     let temp = TempDir::new().expect("tempdir");

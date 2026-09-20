@@ -61,6 +61,14 @@ impl Language {
             zh: "已保存编辑器配置。",
             en: "Editor configuration saved.",
         },
+        browser_and_edit_conflict() => {
+            zh: "`--browser` 与 `--edit` 不能同时使用，请只指定一个",
+            en: "`--browser` and `--edit` cannot be used together; pick one",
+        },
+        output_flag_needs_query(flag: &str, command: &str) => {
+            zh: "`{flag}` 只对查询有效，不能与 `{command}` 一起使用；请写成 `gg {flag} <命令>`",
+            en: "`{flag}` only applies to a query, so it cannot be used with `{command}`; use `gg {flag} <command>`",
+        },
         set_editor_unusable(reason: &str) => {
             zh: "编辑器不可用（{reason}），配置已保存；`gg -e` 会回退到系统默认编辑器",
             en: "Editor is not usable ({reason}); the config was saved and `gg -e` will fall back to the system default",
