@@ -253,6 +253,33 @@ fn search_content_flag_accepts_long_form() {
         .stdout(predicate::str::contains("aws:1: AWS CLI 用法"));
 }
 
+/// 命中行按**原文**输出：代码块缩进属于上下文，不能被抹掉。
+///
+/// 这也让输出可直接与源文件对拍（与 `grep` / `ripgrep` 的取行方式一致）。
+#[test]
+fn search_content_preserves_indentation() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(
+        &notes_dir,
+        "grep",
+        "# grep\n\n```bash\n    grep -rn \"TODO\" ./src\n```\n",
+    );
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "search",
+        "-c",
+        "grep -rn",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stdout("grep:4:     grep -rn \"TODO\" ./src\n");
+}
+
 /// `search` 是带条件的查询：无命中即「没有产生任何结果」，必须像 `grep` 一样
 /// 返回退出码 3，便于 `gg search foo || echo 没找到`。
 ///

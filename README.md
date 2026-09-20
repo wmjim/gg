@@ -56,7 +56,7 @@ gg ls
 gg ls                    # 查询 ls 的笔记
 gg list                  # 列出全部笔记（终端下多列显示）
 gg search grep           # 按文件名搜索
-gg search -c 递归        # 按正文搜索，输出 `文件:行号: 内容`
+gg search -c 递归        # 按正文搜索，输出 `文件:行号: 内容`（内容取原文，保留缩进）
 gg -b ls                 # 在浏览器中打开
 gg -e ls                 # 用编辑器打开
 gg rm ls                 # 删除（默认否定，回车 = 不删）

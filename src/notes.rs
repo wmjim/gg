@@ -95,6 +95,8 @@ pub struct ContentMatch {
 
 impl ContentMatch {
     /// grep 风格输出：`<command>:<行号>: <内容>`。
+    ///
+    /// `line` 是原文整行（含行首空白与行尾空白），因此输出可直接与源文件对拍。
     pub fn render(&self) -> String {
         format!("{}:{}: {}", self.command, self.line_number, self.line)
     }
@@ -242,7 +244,9 @@ pub fn search_commands_by_name(
 
 /// 按正文内容搜索笔记，返回 grep 风格的命中行。
 ///
-/// 刻意不做 Markdown 语法营剥：用户能直接看到原文上下文，行为可预测。
+/// 刻意不做 Markdown 语法剥离，也**不 trim 行首空白**：用户能直接看到原文上下文，
+/// 行为可预测。行首空白承载着信息（代码块缩进、列表层级），抹掉它就看不到匹配
+/// 所在的上下文了 —— 与 `grep` / `ripgrep` 的取行方式保持一致。
 pub fn search_notes_by_content(
     notes_dir: &Path,
     keyword: &str,
@@ -276,7 +280,8 @@ pub fn search_notes_by_content(
                 items.push(ContentMatch {
                     command: command.clone(),
                     line_number: index + 1,
-                    line: line.trim().to_string(),
+                    // 逐字保留：`lines()` 已处理 `\r\n`，无需再靠 trim 清理行尾。
+                    line: line.to_string(),
                 });
             }
         }
@@ -540,6 +545,47 @@ mod tests {
         let found = scan_commands(&missing, Language::Zh).expect("目录不存在不是错误");
         assert!(found.items.is_empty());
         assert!(found.skipped.is_empty());
+    }
+
+    #[test]
+    fn content_search_reports_lines_verbatim() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // 代码块缩进（行首 4 空格）与行尾空白都是原文的一部分。
+        fs::write(
+            temp.path().join("grep.md"),
+            "# grep\n\n```bash\n    grep -rn TODO ./src \n```\n",
+        )
+        .expect("写笔记");
+
+        let found =
+            search_notes_by_content(temp.path(), "grep -rn", Language::Zh).expect("搜索正文");
+
+        assert_eq!(found.items.len(), 1);
+        // 逐个字段断言而不是比对渲染后的字符串：行尾空格在字面量里看不见。
+        assert_eq!(found.items[0].line_number, 4);
+        assert_eq!(found.items[0].line, "    grep -rn TODO ./src ");
+        assert_eq!(found.items[0].render(), "grep:4:     grep -rn TODO ./src ");
+    }
+
+    /// 行首空白是有效信息（代码块缩进、列表层级），不能被抹掉 —— 这与 `grep`
+    /// 的取行方式一致，也让输出可以直接与源文件对拍。
+    #[test]
+    fn content_search_preserves_indentation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join("awk.md"),
+            "# awk\n\n- 常用写法\n  - 按列求和：`awk '{s+=$1} END {print s}'`\n",
+        )
+        .expect("写笔记");
+
+        let found =
+            search_notes_by_content(temp.path(), "按列求和", Language::Zh).expect("搜索正文");
+        let rendered: Vec<String> = found.items.iter().map(ContentMatch::render).collect();
+
+        assert_eq!(
+            rendered,
+            vec!["awk:4:   - 按列求和：`awk '{s+=$1} END {print s}'`"]
+        );
     }
 
     #[test]
