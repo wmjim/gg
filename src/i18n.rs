@@ -61,6 +61,10 @@ impl Language {
             zh: "已保存编辑器配置。",
             en: "Editor configuration saved.",
         },
+        set_editor_unusable(reason: &str) => {
+            zh: "编辑器不可用（{reason}），配置已保存；`gg -e` 会回退到系统默认编辑器",
+            en: "Editor is not usable ({reason}); the config was saved and `gg -e` will fall back to the system default",
+        },
         saved_language_config() => {
             zh: "已保存语言配置。",
             en: "Language configuration saved.",

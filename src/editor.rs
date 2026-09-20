@@ -84,6 +84,30 @@ impl EditorLauncher for SystemEditor {
     }
 }
 
+/// 检查 `--set-editor` 的取值能否定位到可执行文件，返回不可用原因。
+///
+/// 只用于**提前告知**，不阻断写入。配置里的编辑器在运行时会优雅回退（先环境
+/// 变量、再系统默认），「先设好、稍后再装」是合理用法；这里的目标是让拼写
+/// 错误在**输入的那一刻**就暴露，而不是等到下次 `gg -e` 才发现。
+///
+/// 纯空白表示「清除编辑器配置」（`AppConfig::editor_spec` 同样把它当成未设置），
+/// 不算拼写错误。
+///
+/// 校验用的是与运行时同一个 `resolve_program`，因此不会出现「这里说没问题、
+/// 到 `-e` 却启动不了」的不一致。
+///
+/// 取 `{err}`（只看顶层文案）而不是 `{err:#}`（带整个错误链）：链尾是
+/// `which` 自己的英文报错（`cannot find binary path`），混进中文提示就是 i18n
+/// 泄漏。需要完整链时用 `GG_DEBUG=1`。
+pub fn spec_problem(spec: &str, lang: Language) -> Option<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+
+    resolve_program(spec, lang).err().map(|err| err.to_string())
+}
+
 fn try_editor(spec: &str, path: &Path, lang: Language) -> std::result::Result<(), EditorFailure> {
     let program = resolve_program(spec, lang).map_err(EditorFailure::NotInstalled)?;
     run_editor(&program, path, lang).map_err(EditorFailure::RunFailed)

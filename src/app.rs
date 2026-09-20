@@ -6,7 +6,7 @@
 use crate::ai::{AiNoteGenerator, NoteGenerator};
 use crate::cli::{Action, Cli};
 use crate::config::{self, AiInvocation, AppConfig};
-use crate::editor::{EditorLauncher, SystemEditor};
+use crate::editor::{self, EditorLauncher, SystemEditor};
 use crate::error;
 use crate::i18n::Language;
 use crate::notes;
@@ -57,12 +57,9 @@ pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
     let config_only = matches!(parts.action, Action::None)
         && (parts.set_editor.is_some() || parts.lang.is_some());
 
-    if let Some(editor) = parts.set_editor {
-        config.editor = Some(editor);
-        config.save(lang)?;
-        eprintln!("{}", config.language().saved_editor_config());
-    }
-
+    // 先应用 `--lang` 再应用 `--set-editor`：这样两条确认信息都用用户本次要求的
+    // 语言输出（否则 `gg --lang en --set-editor X` 会打印中文的编辑器确认），
+    // 且 `--lang` 非法时直接退出，不会留下「编辑器已写入、语言却报错」的半成品。
     if let Some(raw) = parts.lang {
         let Some(chosen) = Language::parse(&raw) else {
             return Err(error::usage(config.language().invalid_language(&raw)));
@@ -70,6 +67,18 @@ pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
         config.language = Some(chosen);
         config.save(chosen)?;
         eprintln!("{}", chosen.saved_language_config());
+    }
+
+    if let Some(editor) = parts.set_editor {
+        // 取值定位不到可执行文件时提前告知：拼写错误应在这里暴露，而不是等
+        // 下次 `gg -e`。但不阻断写入 —— 运行时本就会回退到环境变量/系统默认。
+        let problem = editor::spec_problem(&editor, lang);
+        config.editor = Some(editor);
+        config.save(lang)?;
+        eprintln!("{}", config.language().saved_editor_config());
+        if let Some(reason) = problem {
+            eprintln!("{}", config.language().set_editor_unusable(&reason));
+        }
     }
 
     // 没有别的动作时，写配置就是本次的目的：不再走首次运行引导，也不打印帮助。

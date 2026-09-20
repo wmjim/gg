@@ -1176,14 +1176,82 @@ fn invalid_command_line_arguments_exit_with_2() {
 #[test]
 fn set_editor_persists_to_config() {
     let temp = TempDir::new().expect("tempdir");
+    // 用能真实定位到的假编辑器：若用 `hx`，结果会随宿主机是否装了 helix 而变，
+    // 而这一条要钉的是「可定位的取值不产生任何警告」。
+    let editor = write_fake_tool(
+        temp.path(),
+        "ok-editor",
+        "#!/bin/sh\nexit 0\n",
+        "@echo off\r\nexit /b 0\r\n",
+    );
 
     let mut cmd = command_for(&temp);
-    cmd.args(["--set-editor", "hx"]);
-    cmd.assert().success();
+    cmd.args(["--set-editor", editor.to_str().expect("utf8")]);
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("不可用").not());
 
     let config_dir = temp.path().join("appdata").join("gg");
     let raw = fs::read_to_string(config_dir.join("config.toml")).expect("配置文件应存在");
-    assert!(raw.contains("editor = \"hx\""), "实际配置:\n{raw}");
+    assert!(raw.contains("editor = "), "实际配置:\n{raw}");
+    assert!(
+        raw.contains("ok-editor"),
+        "配置里应记下所设的编辑器:\n{raw}"
+    );
+}
+
+/// `--set-editor` 取值定位不到可执行文件时应**当场**告知，而不是等到下次
+/// `gg -e` 才发现拼写错误。
+///
+/// 但仍会写入配置：运行时会优雅回退（环境变量 → 系统默认），「先设好、稍后
+/// 再装」是合理用法，因此这里只提示、不阻断。
+#[test]
+fn set_editor_warns_but_still_saves_for_an_unresolvable_spec() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut cmd = command_for(&temp);
+    cmd.args(["--set-editor", "__gg_no_such_editor__"]);
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("不可用"))
+        .stderr(predicate::str::contains("__gg_no_such_editor__"))
+        // 中文提示里不能混进 `which` 自己的英文报错（取 `{err}` 而非 `{err:#}`）。
+        .stderr(predicate::str::contains("cannot find").not());
+
+    let config_dir = temp.path().join("appdata").join("gg");
+    let raw = fs::read_to_string(config_dir.join("config.toml")).expect("配置文件应存在");
+    assert!(
+        raw.contains("__gg_no_such_editor__"),
+        "不可定位的取值也应原样保存:\n{raw}"
+    );
+}
+
+/// 纯空白取值表示「清除编辑器配置」，不是拼写错误，不应报警。
+#[test]
+fn set_editor_accepts_a_blank_value_as_clearing() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut cmd = command_for(&temp);
+    cmd.args(["--set-editor", "   "]);
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("不可用").not());
+}
+
+/// 同时给出 `--lang` 与 `--set-editor` 时，两条确认信息都该用本次要求的语言。
+#[test]
+fn lang_and_set_editor_agree_on_the_language() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut cmd = command_for(&temp);
+    cmd.args(["--lang", "en", "--set-editor", "__gg_no_such_editor__"]);
+
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains("Language configuration saved"))
+        .stderr(predicate::str::contains("Editor configuration saved"))
+        .stderr(predicate::str::contains("is not usable"))
+        .stderr(predicate::str::contains("已保存").not());
 }
 
 #[test]
