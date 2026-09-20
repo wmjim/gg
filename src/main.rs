@@ -17,7 +17,9 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{}: {err:#}", lang.error_prefix());
-            ExitCode::FAILURE
+            // 2 = 命令行用错（含 gg 自己的取值校验），1 = 运行时失败。
+            // 判定规则见 gg::error 的模块注释。
+            ExitCode::from(gg::error::exit_code_for(&err))
         }
     }
 }

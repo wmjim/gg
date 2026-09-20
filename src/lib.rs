@@ -3,6 +3,7 @@ pub mod app;
 pub mod cli;
 pub mod config;
 pub mod editor;
+pub mod error;
 pub mod i18n;
 pub mod notes;
 pub mod prompt;

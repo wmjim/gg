@@ -7,6 +7,7 @@ use crate::ai::{AiNoteGenerator, NoteGenerator};
 use crate::cli::{Action, Cli};
 use crate::config::{self, AiInvocation, AppConfig};
 use crate::editor::{EditorLauncher, SystemEditor};
+use crate::error;
 use crate::i18n::Language;
 use crate::notes;
 use crate::prompt::{ConsolePrompter, Prompter};
@@ -42,6 +43,7 @@ const DEFAULT_TERMINAL_WIDTH: usize = 80;
 /// 「没有产生任何结果」的退出码，便于脚本判断（`gg foo || echo "没笔记"`）。
 ///
 /// 覆盖两种情况：查询未命中笔记，以及操作因缺少用户确认而未执行。
+/// 「命令行用法错误」（2）与「运行时错误」（1）的判定见 [`crate::error`]。
 pub const EXIT_NOTE_NOT_FOUND: u8 = 3;
 
 pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
@@ -49,21 +51,29 @@ pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
     let notes_dir = config::resolve_notes_dir(parts.notes_dir, lang)?;
     let mut config = AppConfig::load(lang)?;
 
-    // --set-editor / --lang 是纯配置动作，先于首次运行引导处理。
+    // --set-editor / --lang 只写配置，本身不构成一次请求：写完后继续执行本次
+    // 动作（`gg --lang en list` 必须既保存语言又列出笔记）。早期实现在这里
+    // 直接 return，子命令会被静默吞掉。
+    let config_only = matches!(parts.action, Action::None)
+        && (parts.set_editor.is_some() || parts.lang.is_some());
+
     if let Some(editor) = parts.set_editor {
         config.editor = Some(editor);
         config.save(lang)?;
         eprintln!("{}", config.language().saved_editor_config());
-        return Ok(ExitCode::SUCCESS);
     }
 
     if let Some(raw) = parts.lang {
         let Some(chosen) = Language::parse(&raw) else {
-            anyhow::bail!("{}", config.language().invalid_language(&raw));
+            return Err(error::usage(config.language().invalid_language(&raw)));
         };
         config.language = Some(chosen);
         config.save(chosen)?;
         eprintln!("{}", chosen.saved_language_config());
+    }
+
+    // 没有别的动作时，写配置就是本次的目的：不再走首次运行引导，也不打印帮助。
+    if config_only {
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -90,7 +100,14 @@ pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
         .exit_code()
         .map_or(ExitCode::SUCCESS, ExitCode::from)),
         Action::Search { keyword, content } => {
-            if content {
+            // 空关键词几乎总是脚本失误（`gg search $var` 而变量为空）。必须明确
+            // 报错：不拦的话，文件名搜索会因 `contains("")` 恒真而列出全部，
+            // 正文搜索却返回零条——同一个输入得到相反的语义。
+            if keyword.trim().is_empty() {
+                return Err(error::usage(lang.search_keyword_empty()));
+            }
+
+            let matched = if content {
                 let found = notes::search_notes_by_content(&notes_dir, &keyword, lang)?;
                 warn_skipped(&found.skipped, lang);
                 let lines = found
@@ -99,12 +116,22 @@ pub fn run(cli: Cli, lang: Language) -> Result<ExitCode> {
                     .map(notes::ContentMatch::render)
                     .collect::<Vec<_>>();
                 output::write_lines(io::stdout().lock(), lines, lang)?;
+                !found.items.is_empty()
             } else {
                 let found = notes::search_commands_by_name(&notes_dir, &keyword, lang)?;
                 warn_skipped(&found.skipped, lang);
                 write_commands(&found.items, lang)?;
-            }
-            Ok(ExitCode::SUCCESS)
+                !found.items.is_empty()
+            };
+
+            // 与 `grep` 一致：搜索是一次带条件的查询，无命中即「没有产生任何
+            // 结果」，返回 3，便于 `gg search foo || echo 没找到`。`list` 是
+            // 枚举而非查询，空目录仍按成功处理。
+            Ok(if matched {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(EXIT_NOTE_NOT_FOUND)
+            })
         }
         Action::Query(command) => {
             if config.is_first_run() {
@@ -234,8 +261,12 @@ fn remove_notes(
     assume_yes: bool,
     lang: Language,
 ) -> Result<RemoveOutcome> {
-    // 空目标集是静默空操作，宁可明确报错
-    anyhow::ensure!(!commands.is_empty(), "{}", lang.remove_needs_a_target());
+    // 空目标集是静默空操作，宁可明确报错。
+    // 实际经由 clap 的 `rm` 时不可达（`num_args = 1..` 已保证非空），
+    // 这里作为内部不变量护栏保留。
+    if commands.is_empty() {
+        return Err(error::usage(lang.remove_needs_a_target()));
+    }
 
     // 先校验并收集目标，避免「删了几个才发现有笔误」的半成品状态
     let mut targets: Vec<(String, PathBuf)> = Vec::new();

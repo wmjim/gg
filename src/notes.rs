@@ -1,3 +1,4 @@
+use crate::error;
 use crate::i18n::Language;
 use anyhow::{Context, Result};
 use std::fs;
@@ -17,23 +18,23 @@ const RESERVED_DEVICE_NAMES: &[&str] = &[
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
+/// 校验命令名。
+///
+/// 命令名直接来自命令行，所以校验失败属于**用法错误**（退出码 2），不是
+/// 运行时错误：命令行本身就用错了。
 pub fn validate_command_name(command: &str, lang: Language) -> Result<()> {
-    anyhow::ensure!(!command.is_empty(), "{}", lang.note_command_empty());
-    anyhow::ensure!(
-        !command.chars().any(char::is_whitespace),
-        "{}",
-        lang.note_command_has_whitespace()
-    );
-    anyhow::ensure!(
-        !command.chars().any(|c| INVALID_NAME_CHARS.contains(&c)),
-        "{}",
-        lang.note_command_has_path_chars()
-    );
-    anyhow::ensure!(
-        !is_reserved_device_name(command),
-        "{}",
-        lang.note_command_is_reserved(command)
-    );
+    if command.is_empty() {
+        return Err(error::usage(lang.note_command_empty()));
+    }
+    if command.chars().any(char::is_whitespace) {
+        return Err(error::usage(lang.note_command_has_whitespace()));
+    }
+    if command.chars().any(|c| INVALID_NAME_CHARS.contains(&c)) {
+        return Err(error::usage(lang.note_command_has_path_chars()));
+    }
+    if is_reserved_device_name(command) {
+        return Err(error::usage(lang.note_command_is_reserved(command)));
+    }
     Ok(())
 }
 

@@ -397,6 +397,10 @@ impl Language {
             zh: "需要指定至少一个要删除的命令名",
             en: "At least one command name to remove is required",
         },
+        search_keyword_empty() => {
+            zh: "搜索关键词不能为空（例如 `gg search grep`）",
+            en: "Search keyword cannot be empty (e.g. `gg search grep`)",
+        },
         help_print_failed() => {
             zh: "无法输出帮助信息",
             en: "Failed to print help",

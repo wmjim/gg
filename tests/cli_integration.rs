@@ -202,7 +202,8 @@ fn search_ignores_note_bodies_by_default() {
         "关键字",
     ]);
 
-    cmd.assert().success().stdout("");
+    // 未命中即「没有产生任何结果」：退出码 3，stdout 保持为空。
+    cmd.assert().failure().code(3).stdout("");
 }
 
 #[test]
@@ -244,6 +245,81 @@ fn search_content_flag_accepts_long_form() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("aws:1: AWS CLI 用法"));
+}
+
+/// `search` 是带条件的查询：无命中即「没有产生任何结果」，必须像 `grep` 一样
+/// 返回退出码 3，便于 `gg search foo || echo 没找到`。
+#[test]
+fn search_without_matches_exits_3() {
+    for extra in [Vec::new(), vec!["-c"]] {
+        let temp = TempDir::new().expect("tempdir");
+        let notes_dir = temp.path().join("notes");
+        write_note(&notes_dir, "ls", "# ls\n列出目录\n");
+
+        let mut cmd = command_for(&temp);
+        cmd.arg("--notes-dir").arg(&notes_dir);
+        cmd.arg("search").args(&extra).arg("zzzz");
+
+        cmd.assert()
+            .failure()
+            .code(3)
+            .stdout(predicate::str::is_empty());
+    }
+}
+
+/// 空关键词是用法错误：`gg search $var` 而变量为空时最常见。
+///
+/// 拦住之前，文件名搜索会因 `contains("")` 恒真而列出全部、正文搜索却返回
+/// 零条——同一个输入得到相反的语义。
+#[test]
+fn search_with_an_empty_keyword_is_a_usage_error() {
+    for keyword in ["", "   "] {
+        for extra in [Vec::new(), vec!["-c"]] {
+            let temp = TempDir::new().expect("tempdir");
+            let notes_dir = temp.path().join("notes");
+            write_note(&notes_dir, "ls", "# ls\n列出目录\n");
+
+            let mut cmd = command_for(&temp);
+            cmd.arg("--notes-dir").arg(&notes_dir);
+            cmd.arg("search").args(&extra).arg(keyword);
+
+            cmd.assert()
+                .failure()
+                .code(2)
+                .stdout(predicate::str::is_empty())
+                .stderr(predicate::str::contains("搜索关键词不能为空"));
+        }
+    }
+}
+
+#[test]
+fn empty_search_keyword_error_is_localized() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+
+    let mut cmd = command_for(&temp);
+    cmd.arg("--lang").arg("en");
+    cmd.arg("--notes-dir").arg(&notes_dir);
+    cmd.arg("search").arg("");
+
+    cmd.assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be empty"));
+}
+
+/// 空目录下 `list` 是枚举而非查询，仍按成功处理（对齐 `ls`）。
+#[test]
+fn list_on_an_empty_directory_still_exits_0() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    fs::create_dir_all(&notes_dir).expect("创建笔记目录");
+
+    let mut cmd = command_for(&temp);
+    cmd.arg("--notes-dir").arg(&notes_dir).arg("list");
+
+    cmd.assert().success().stdout(predicate::str::is_empty());
 }
 
 // ---------------------------------------------------------------- 编辑笔记
@@ -577,6 +653,7 @@ fn rm_rejects_path_traversal() {
 
     cmd.assert()
         .failure()
+        .code(2)
         .stderr(predicate::str::contains("路径字符"));
     assert!(notes_dir.join("ls.md").exists());
 }
@@ -973,6 +1050,64 @@ fn lang_option_persists_and_localizes_help() {
         .stdout(predicate::str::contains("Commands:"));
 }
 
+/// 回归：`--lang` 是全局配置项，不能吞掉同一次调用里的子命令。
+#[test]
+fn lang_flag_still_runs_the_requested_subcommand() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--lang",
+        "en",
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "list",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stdout("ls\n")
+        .stderr(predicate::str::contains("Language configuration saved"));
+}
+
+/// 同理：`--set-editor` 也不能吞掉子命令。
+#[test]
+fn set_editor_flag_still_runs_the_requested_subcommand() {
+    let temp = TempDir::new().expect("tempdir");
+    let notes_dir = temp.path().join("notes");
+    write_note(&notes_dir, "ls", "# ls\n");
+
+    let mut cmd = command_for(&temp);
+    cmd.args([
+        "--set-editor",
+        "hx",
+        "--notes-dir",
+        notes_dir.to_str().expect("utf8"),
+        "list",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stdout("ls\n")
+        .stderr(predicate::str::contains("已保存编辑器配置"));
+}
+
+/// 不带其它动作时，写配置就是本次的目的：只给确认，不额外打印帮助。
+#[test]
+fn lang_flag_alone_does_not_print_help() {
+    let temp = TempDir::new().expect("tempdir");
+
+    let mut cmd = command_for(&temp);
+    cmd.args(["--lang", "en"]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("Language configuration saved"));
+}
+
 #[test]
 fn lang_option_from_argv_localizes_help_immediately() {
     let temp = TempDir::new().expect("tempdir");
@@ -995,9 +1130,47 @@ fn invalid_lang_option_fails_loudly() {
     let mut cmd = command_for(&temp);
     cmd.args(["--lang", "jp"]);
 
+    // 取值非法属于「命令行用错」，与 clap 的结构性错误同为退出码 2。
     cmd.assert()
         .failure()
+        .code(2)
         .stderr(predicate::str::contains("jp"));
+}
+
+/// 退出码约定：**命令行本身用错**一律是 2。
+///
+/// 对用户是同一件事的两类错误必须同码：clap 的结构性错误（缺参数、未知选项）
+/// 由 clap 直接给出 2；`gg` 对参数取值的校验（`--lang jp`、含空格的命令名、
+/// 空搜索关键词）由 `gg::error::UsageError` 标记，`main` 据此返回 2。
+///
+/// 边界见 `invalid_config_reports_the_offending_file`：**配置文件里的**非法值
+/// 是环境问题，仍为 1。
+#[test]
+fn invalid_command_line_arguments_exit_with_2() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["--lang", "jp"], "无效的语言选项"),
+        (&["foo bar"], "不能含空格"),
+        (&["../etc/passwd"], "路径字符"),
+        (&["a|b"], "路径字符"),
+        (&["nul"], "保留设备名"),
+        (&["rm", "foo bar"], "不能含空格"),
+        (&["show", "../x"], "路径字符"),
+        (&["search", ""], "搜索关键词不能为空"),
+    ];
+
+    for (args, expected) in cases {
+        let temp = TempDir::new().expect("tempdir");
+        let notes_dir = temp.path().join("notes");
+        write_note(&notes_dir, "ls", "# ls\n");
+
+        let mut cmd = command_for(&temp);
+        cmd.arg("--notes-dir").arg(&notes_dir).args(*args);
+
+        cmd.assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains(*expected));
+    }
 }
 
 #[test]
@@ -1025,6 +1198,8 @@ fn invalid_config_reports_the_offending_file() {
 
     cmd.assert()
         .failure()
+        // 与命令行上的取值非法相反：**配置文件里**的非法值是环境问题，仍为 1。
+        .code(1)
         .stderr(predicate::str::contains("无法解析配置文件"))
         .stderr(predicate::str::contains("config.toml"));
 }
@@ -1078,5 +1253,6 @@ fn path_traversal_is_rejected() {
 
     cmd.assert()
         .failure()
+        .code(2)
         .stderr(predicate::str::contains("路径字符"));
 }
