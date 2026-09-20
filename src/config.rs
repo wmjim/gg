@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// AI 提供方。非法取值在配置反序列化阶段就报错，而不是等查询时才提示。
@@ -97,15 +98,19 @@ impl AppConfig {
     }
 
     pub fn save(&self, lang: Language) -> Result<()> {
-        let path = config_path(lang)?;
-        if let Some(parent) = path.parent() {
+        self.save_to(&config_path(lang)?, lang)
+    }
+
+    /// [`Self::save`] 的可注入版本；参数化路径是为了脱离进程环境测试。
+    fn save_to(&self, path: &Path, lang: Language) -> Result<()> {
+        let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+        if let Some(parent) = parent {
             fs::create_dir_all(parent)
                 .with_context(|| lang.config_dir_create_failed(&parent.display().to_string()))?;
         }
+
         let raw = toml::to_string_pretty(self).context(lang.config_serialize_failed())?;
-        fs::write(&path, raw)
-            .with_context(|| lang.config_write_failed(&path.display().to_string()))?;
-        Ok(())
+        write_atomically(parent.unwrap_or_else(|| Path::new(".")), path, &raw, lang)
     }
 
     /// 尚未选择过界面语言，视为首次运行。
@@ -158,6 +163,38 @@ impl AppConfig {
             seconds => Some(std::time::Duration::from_secs(seconds)),
         }
     }
+}
+
+/// 原子写入：先写同目录的临时文件，再 `rename` 覆盖目标。
+///
+/// 直接用 `fs::write` 会先把文件截断成 0 字节再写（`File::create` + `write_all`），
+/// 进程在这两步之间被杀（Ctrl-C、OOM、关机）就会留下半截 TOML。而配置解析是
+/// 严格的（`deny_unknown_fields` + 取值校验），半截文件会让 `gg` **完全无法
+/// 启动**，用户只能手工修复或删除它。
+///
+/// 同目录内的 `rename` 是原子的：目标只会是「旧配置」或「新配置」，不存在中间
+/// 态。先 `sync_all` 保证数据先于目录项落盘，避免重命名后掉电得到空文件。
+/// 临时文件与目标同目录是必须的——跨文件系统的 `rename` 会退化成复制+删除。
+///
+/// 副作用：`tempfile` 以 0600 创建临时文件，重命名后配置文件的权限比过去直接
+/// `fs::write`（通常受 umask 影响为 0644）更严。配置里不放密钥，收紧无害；
+/// 若将来要恢复旧权限，需先读原文件权限再设给临时文件。
+fn write_atomically(dir: &Path, path: &Path, content: &str, lang: Language) -> Result<()> {
+    let target = path.display().to_string();
+
+    let mut file = tempfile::Builder::new()
+        .prefix(".config-")
+        .suffix(".toml.tmp")
+        .tempfile_in(dir)
+        .with_context(|| lang.config_write_failed(&target))?;
+    file.write_all(content.as_bytes())
+        .with_context(|| lang.config_write_failed(&target))?;
+    file.as_file()
+        .sync_all()
+        .with_context(|| lang.config_write_failed(&target))?;
+    file.persist(path)
+        .with_context(|| lang.config_write_failed(&target))?;
+    Ok(())
 }
 
 /// 从指定路径读取配置。
@@ -485,6 +522,64 @@ language = "zh"
         let raw = toml::to_string_pretty(&cfg).expect("序列化");
         let parsed: AppConfig = toml::from_str(&raw).expect("反序列化");
         assert_eq!(parsed, cfg);
+    }
+
+    /// 原子写入：旧配置被完整替换，且不留临时文件。
+    ///
+    /// 直接 `fs::write` 会先截断再写，中断即得到半截 TOML；而配置解析是严格的，
+    /// 半截文件会让 `gg` 完全无法启动。这里钉住「要么旧、要么新」的语义。
+    #[test]
+    fn save_replaces_the_config_and_leaves_no_temp_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("gg");
+        fs::create_dir_all(&dir).expect("建目录");
+        let path = dir.join("config.toml");
+        fs::write(&path, "language = \"en\"\n").expect("预置旧配置");
+
+        let cfg = AppConfig {
+            language: Some(Language::Zh),
+            editor: Some("hx".to_string()),
+            ..AppConfig::default()
+        };
+        cfg.save_to(&path, Language::Zh).expect("保存成功");
+
+        let reloaded = load_from(&path, Language::Zh).expect("重新读取");
+        assert_eq!(reloaded, cfg, "新配置应完整覆盖旧配置");
+
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .expect("读目录")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "config.toml")
+            .collect();
+        assert!(leftovers.is_empty(), "不应留下临时文件: {leftovers:?}");
+    }
+
+    #[test]
+    fn save_creates_the_config_directory_on_demand() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("brand-new").join("config.toml");
+
+        AppConfig::default()
+            .save_to(&path, Language::Zh)
+            .expect("应创建父目录并写入");
+        assert!(path.is_file());
+    }
+
+    /// 写入失败必须报错，且不得在目标位置留下半成品。
+    #[test]
+    fn failed_save_reports_an_error_and_writes_nothing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // 父目录的位置被普通文件占住，create_dir_all 必然失败。
+        let blocker = temp.path().join("blocked");
+        fs::write(&blocker, "not a directory").expect("占位文件");
+
+        let err = AppConfig::default()
+            .save_to(&blocker.join("config.toml"), Language::Zh)
+            .expect_err("父目录建不出来时必须报错");
+
+        assert!(format!("{err:#}").contains("无法创建配置目录"), "{err:#}");
+        assert!(blocker.is_file(), "占位文件不应被改动");
     }
 
     /// `dirs` 失败时兜底必须能拿到配置目录，否则没有 `--notes-dir` 的调用会
