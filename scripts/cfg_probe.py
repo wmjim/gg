@@ -138,6 +138,30 @@ def expand_start(text: str, start: int) -> int:
     return start
 
 
+def assert_only_lines_were_removed(original: str, rewritten: str, path: pathlib.Path) -> None:
+    """确认改写结果只是原内容的**整行删除**。
+
+    探针只删两类东西：命中的 `#[cfg(..)]` 属性，以及不命中的整个门控项（连同
+    它前面的文档注释与其它属性）。因此结果必然是原文的子序列，绝不会新增或
+    改写任何一行。
+
+    把这条不变量钉住，是因为它同时挡住两类回归：改写逻辑意外动到内容，以及
+    删属性时忘吞行尾换行 —— 后者会凭空多出一个空行，若紧跟在一行 `///` 后面，
+    就是 clippy 的 empty_line_after_doc_comments（三个平台因此各误报过 2/4/1
+    条，使探针配 `-D warnings` 时完全不可用）。
+    """
+    remaining = iter(original.split("\n"))
+    for number, line in enumerate(rewritten.split("\n"), start=1):
+        for candidate in remaining:
+            if candidate == line:
+                break
+        else:
+            raise SystemExit(
+                f"探针在 {path}:{number} 新增/改写了内容而不是整行删除: {line!r}\n"
+                "这属于探针自身的缺陷（会把本该由 -D warnings 拦住的告警提前制造出来）"
+            )
+
+
 def rewrite_for_profile(text: str, profile: dict) -> str:
     while True:
         changed = False
@@ -146,10 +170,27 @@ def rewrite_for_profile(text: str, profile: dict) -> str:
             if verdict is None:
                 continue
             if verdict:
-                text = text[: match.start(1)] + text[match.end() :]
+                # 属性独占一行时，把它那一行的换行符一并吃掉。
+                #
+                # 只删 `#[cfg(..)]` 而留下行尾换行，会在原位置凭空多出一行空行：
+                # 若该项带 `///` 文档注释，就变成「文档注释 + 空行 + 项」，
+                # clippy 报 empty_line_after_doc_comments —— 探针自己造出来的告警
+                # （三个平台各报过 2/4/1 条，使脚本配 `-D warnings` 时不可用）。
+                # 属性后面还有内容（同一行跟了项）时不能吞，否则会把项删掉。
+                end = match.end()
+                line_end = text.find("\n", end)
+                if line_end != -1 and not text[end:line_end].strip():
+                    end = line_end + 1
+                text = text[: match.start(1)] + text[end:]
             else:
                 end = item_end(text, match.end())
                 start = expand_start(text, match.start())
+                # 同样把该项最后一行的行尾换行一并吃掉：保留它会让删除处凭空
+                # 多出一行空行，结果就不再是「纯粹的整行删除」。
+                # 行尾还有别的内容（形如 `} else {`）时不能吞，否则会删掉内容。
+                line_end = text.find("\n", end)
+                if line_end != -1 and not text[end + 1 : line_end].strip():
+                    end = line_end
                 text = text[:start] + text[end + 1 :]
             changed = True
             break
@@ -174,7 +215,9 @@ def build(source: pathlib.Path, root: pathlib.Path) -> list[pathlib.Path]:
         ):
             text = path.read_text(encoding="utf-8")
             if "#[cfg(" in text:
-                path.write_text(rewrite_for_profile(text, profile), encoding="utf-8")
+                rewritten = rewrite_for_profile(text, profile)
+                assert_only_lines_were_removed(text, rewritten, path)
+                path.write_text(rewritten, encoding="utf-8")
 
         targets.append(target)
         print(f"  生成 {name} 配置 -> {target}")
