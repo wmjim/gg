@@ -262,13 +262,43 @@ fn write_commands(commands: &[String], lang: Language) -> Result<()> {
     output::write_lines(stdout.lock(), commands.to_vec(), lang)
 }
 
-/// 终端宽度：没有可靠的跨平台 std API，只能用 `COLUMNS`，否则按 80 列。
+/// 终端宽度（列数），优先级：`COLUMNS` > 内核报告的真实尺寸 > 80。
+///
+/// 过去只用 `COLUMNS`：它只是 shell 变量，默认**不会**导出，于是真实终端里几乎
+/// 总是落到 80 列兜底，宽终端白白空着一半。现在先问内核（`terminal_size` 会依次
+/// 尝试 stdout / stderr / stdin 的 `TIOCGWINSZ`）。
+///
+/// `COLUMNS` 仍然优先，因为它是**显式覆盖**：脚本与用户可以据此固定排版
+/// （`COLUMNS=40 gg list`）。
 fn terminal_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|width| *width > 0)
+    resolve_terminal_width(columns_from_env(), reported_width())
+}
+
+/// 内核报告的真实宽度。拿不到（不是终端、或平台不支持）时为 `None`。
+fn reported_width() -> Option<u16> {
+    terminal_size::terminal_size().map(|(terminal_size::Width(width), _)| width)
+}
+
+/// 宽度决策的纯函数部分，便于脱离进程环境与真实终端测试。
+///
+/// 两个来源都可能给出 0（`COLUMNS=0`、某些伪终端报 0 列），在这里统一视为无效：
+/// 否则布局会算出 0 列。解析层只负责把字符串变成数字，不判断可用性。
+fn resolve_terminal_width(columns: Option<usize>, reported: Option<u16>) -> usize {
+    let usable = |width: usize| (width > 0).then_some(width);
+
+    columns
+        .and_then(usable)
+        .or_else(|| reported.map(usize::from).and_then(usable))
         .unwrap_or(DEFAULT_TERMINAL_WIDTH)
+}
+
+fn columns_from_env() -> Option<usize> {
+    columns_from(|key| std::env::var(key).ok())
+}
+
+/// [`columns_from_env`] 的可注入版本；参数化是为了脱离进程环境测试。
+fn columns_from(mut lookup: impl FnMut(&str) -> Option<String>) -> Option<usize> {
+    lookup("COLUMNS").and_then(|value| value.trim().parse::<usize>().ok())
 }
 
 /// 扫描时被跳过的条目必须让用户看到，否则会误以为列表是完整的。
@@ -792,6 +822,53 @@ mod tests {
             message.lines().next(),
             Some("No notes for `lz`, recommend:")
         );
+    }
+
+    /// 本次修复的核心：内核报的尺寸要压过 80 列兜底，否则宽终端白白空着一半。
+    #[test]
+    fn terminal_width_uses_the_reported_size() {
+        assert_eq!(resolve_terminal_width(None, Some(120)), 120);
+        assert_eq!(resolve_terminal_width(None, None), DEFAULT_TERMINAL_WIDTH);
+    }
+
+    /// `COLUMNS` 是显式覆盖，脚本与用户可以据此固定排版，因此优先于真实尺寸。
+    #[test]
+    fn terminal_width_prefers_the_explicit_columns_override() {
+        assert_eq!(resolve_terminal_width(Some(40), Some(200)), 40);
+    }
+
+    /// 某些伪终端会报 0 列，`COLUMNS=0` 同理：两者都必须退回兜底值，
+    /// 否则布局会算出 0 列。
+    #[test]
+    fn zero_width_never_wins() {
+        assert_eq!(
+            resolve_terminal_width(None, Some(0)),
+            DEFAULT_TERMINAL_WIDTH
+        );
+        assert_eq!(
+            resolve_terminal_width(Some(0), Some(0)),
+            DEFAULT_TERMINAL_WIDTH
+        );
+        assert_eq!(
+            resolve_terminal_width(Some(0), Some(120)),
+            120,
+            "无效的 COLUMNS 不应把它下面的真实尺寸也挡掉"
+        );
+    }
+
+    #[test]
+    fn columns_env_is_parsed_leniently() {
+        let from = |value: Option<&str>| {
+            let value = value.map(str::to_string);
+            columns_from(move |_| value.clone())
+        };
+
+        assert_eq!(from(Some(" 120 ")), Some(120), "应容忍空白");
+        assert_eq!(from(Some("abc")), None);
+        assert_eq!(from(Some("-5")), None, "usize 解析不接受负数");
+        assert_eq!(from(None), None);
+        // 解析层不管可用性：`0` 能解析出来，是否采用由 `resolve_terminal_width` 决定。
+        assert_eq!(from(Some("0")), Some(0));
     }
 
     fn note_files(temp: &tempfile::TempDir) -> Vec<String> {

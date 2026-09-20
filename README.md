@@ -126,6 +126,7 @@ ai_timeout_seconds = 180  # AI 最长等待秒数，0 表示不限制
 | `GG_GLOW_BIN` | `glow` 路径，支持带参数：`"glow -s dark -w 80"` |
 | `GG_AI_BIN` | 替换 AI 可执行文件（保留预设参数）；旧名 `GG_CLAUDE_BIN` 仍兼容 |
 | `GG_EDITOR` / `VISUAL` / `EDITOR` | 编辑器，优先级依次降低 |
+| `COLUMNS` | 覆盖 `gg list` 的列宽（默认按终端实际宽度，拿不到时按 80 列） |
 | `GG_DEBUG=1` | 输出调试日志，排查外部命令调用问题 |
 
 ## AI 回退
