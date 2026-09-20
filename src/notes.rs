@@ -77,7 +77,9 @@ impl ContentMatch {
 
 pub fn read_note(notes_dir: &Path, command: &str, lang: Language) -> Result<Option<String>> {
     let path = note_path(notes_dir, command);
-    if !path.exists() {
+    // 同名目录不是笔记：按「没有笔记」处理，而不是把它当文件读而报 EISDIR，
+    // 也不是把目录交给编辑器。这里与 `remove_note` 的判断保持一致。
+    if !path.is_file() {
         return Ok(None);
     }
 
@@ -105,13 +107,14 @@ pub fn ensure_note_file(notes_dir: &Path, command: &str, lang: Language) -> Resu
         .with_context(|| lang.notes_dir_create_failed(&notes_dir.display().to_string()))?;
 
     let path = note_path(notes_dir, command);
-    if path.exists() {
+    if path.is_file() {
         return Ok(EnsuredNote {
             path,
             created: false,
         });
     }
 
+    // 同名目录走到这里会因 EISDIR 报错 —— 比把它当成已有笔记交给编辑器好。
     fs::write(&path, "").with_context(|| lang.note_create_failed(&path.display().to_string()))?;
     Ok(EnsuredNote {
         path,
@@ -399,6 +402,29 @@ mod tests {
             !remove_note(temp.path(), "ls", Language::Zh).expect("再次删除不报错"),
             "已不存在应返回 false"
         );
+    }
+
+    /// 同名目录不是笔记：查询时按「没有笔记」处理，而不是把目录当文件读。
+    #[test]
+    fn read_note_ignores_a_directory_with_the_same_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("somedir.md")).expect("建同名目录");
+
+        let content = read_note(temp.path(), "somedir", Language::Zh).expect("目录不算读取错误");
+        assert_eq!(content, None, "目录不应该被当成笔记内容读出来");
+    }
+
+    /// `gg -e` 走 `ensure_note_file`：同名目录不能被当成已有笔记，否则编辑器
+    /// 会被交去打开一个目录。
+    #[test]
+    fn ensure_note_file_rejects_a_directory_with_the_same_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(temp.path().join("somedir.md")).expect("建同名目录");
+
+        let err = ensure_note_file(temp.path(), "somedir", Language::Zh)
+            .expect_err("同名目录必须报错，而不是把目录交给编辑器");
+        assert!(format!("{err:#}").contains("无法新建笔记"), "{err:#}");
+        assert!(temp.path().join("somedir.md").is_dir(), "目录必须还在");
     }
 
     #[test]
