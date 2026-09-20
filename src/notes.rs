@@ -2,6 +2,7 @@ use crate::error;
 use crate::i18n::Language;
 use anyhow::{Context, Result};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 pub fn note_path(notes_dir: &Path, command: &str) -> PathBuf {
@@ -134,24 +135,43 @@ pub fn write_note(
     })?;
     Ok(path)
 }
+
+/// 确保笔记文件存在，供 `--edit` 打开。
+///
+/// 用 `create_new`（`O_CREAT | O_EXCL`）而不「先 `is_file()` 再 `fs::write`」：
+/// 后者在检查与写入之间存在窗口，并发的另一次 `gg -e`、或恰好落盘的 AI 笔记，
+/// 都可能被 `fs::write` 截断成空文件。「不存在才创建」正是 `O_EXCL` 的语义，
+/// 它无法覆盖任何已有内容。顺带也不再跟随悬空符号链接去目录外建文件。
 pub fn ensure_note_file(notes_dir: &Path, command: &str, lang: Language) -> Result<EnsuredNote> {
     fs::create_dir_all(notes_dir)
         .with_context(|| lang.notes_dir_create_failed(&notes_dir.display().to_string()))?;
 
     let path = note_path(notes_dir, command);
-    if path.is_file() {
-        return Ok(EnsuredNote {
-            path,
-            created: false,
-        });
-    }
+    let target = path.display().to_string();
 
-    // 同名目录走到这里会因 EISDIR 报错 —— 比把它当成已有笔记交给编辑器好。
-    fs::write(&path, "").with_context(|| lang.note_create_failed(&path.display().to_string()))?;
-    Ok(EnsuredNote {
-        path,
-        created: true,
-    })
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(_) => Ok(EnsuredNote {
+            path,
+            created: true,
+        }),
+        // 已存在：可能是笔记，也可能是同名目录（或悬空符号链接）。
+        // 只有真实文件才交回给调用方打开 —— 把目录交给编辑器是另一类错误。
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            if path.is_file() {
+                Ok(EnsuredNote {
+                    path,
+                    created: false,
+                })
+            } else {
+                Err(err).with_context(|| lang.note_create_failed(&target))
+            }
+        }
+        Err(err) => Err(err).with_context(|| lang.note_create_failed(&target)),
+    }
 }
 
 /// 删除笔记文件。返回 `false` 表示该命令本来就没有笔记。
@@ -559,6 +579,47 @@ mod tests {
             .expect_err("同名目录必须报错，而不是把目录交给编辑器");
         assert!(format!("{err:#}").contains("无法新建笔记"), "{err:#}");
         assert!(temp.path().join("somedir.md").is_dir(), "目录必须还在");
+    }
+
+    /// 悬空符号链接必须被拒绝，而不是跟着它到笔记目录**之外**创建文件。
+    ///
+    /// `create_new`（`O_EXCL`）对符号链接一律返回 EEXIST，因此不会跟踪链接去建
+    /// 目标；若沿用「先 `is_file()` 再 `fs::write`」的写法，`is_file()` 会因目标
+    /// 不存在而返回 false，`fs::write` 则会顺着链接在目录外建出文件。
+    #[cfg(unix)]
+    #[test]
+    fn ensure_note_file_refuses_a_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = temp.path().join("outside.md");
+        symlink(&outside, temp.path().join("ls.md")).expect("造悬空符号链接");
+
+        let err = ensure_note_file(temp.path(), "ls", Language::Zh).expect_err("必须拒绝");
+
+        assert!(format!("{err:#}").contains("无法新建笔记"), "{err:#}");
+        assert!(!outside.exists(), "不得跟着符号链接在笔记目录外建文件");
+    }
+
+    /// 指向真实文件的符号链接仍照常工作，内容不被清空。
+    #[cfg(unix)]
+    #[test]
+    fn ensure_note_file_accepts_an_existing_symlinked_note() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("real.md");
+        fs::write(&real, "# ls\n").expect("写真笔记");
+        symlink(&real, temp.path().join("ls.md")).expect("造符号链接");
+
+        let ensured = ensure_note_file(temp.path(), "ls", Language::Zh).expect("已有笔记应被接受");
+
+        assert!(!ensured.created);
+        assert_eq!(
+            fs::read_to_string(&real).expect("读取"),
+            "# ls\n",
+            "内容不得被清空"
+        );
     }
 
     #[test]
